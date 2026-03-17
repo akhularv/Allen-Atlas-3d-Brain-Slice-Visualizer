@@ -1,0 +1,2921 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta
+    name="description"
+    content="Interactive 3D Allen atlas slice planner for thalamocortical and hippocampal oblique brain preparations."
+  />
+  <meta name="theme-color" content="#FAF8F5" />
+  <link
+    rel="icon"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%23FAF8F5'/%3E%3Cpath d='M14 32c7-12 29-16 38-4 6 8 2 18-8 22-10 4-23 1-29-7-3-4-3-8-1-11Z' fill='%234A6741'/%3E%3Cpath d='M22 17c7 0 14 3 19 8' fill='none' stroke='%23C4A35A' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E"
+  />
+  <title>Allen Atlas Oblique Slice Planner</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/PLYLoader.js"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500&family=Playfair+Display:wght@400;600&display=swap">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body, #root { width: 100%; height: 100%; overflow: hidden; }
+
+    /* Slider thumb accent */
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      background: #DDD8CE;
+      border-radius: 2px;
+      outline: none;
+      cursor: pointer;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #4A6741;
+      cursor: pointer;
+      border: 2px solid #FAF8F5;
+      box-shadow: 0 0 0 1px #4A6741;
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #4A6741;
+      cursor: pointer;
+      border: 2px solid #FAF8F5;
+      box-shadow: 0 0 0 1px #4A6741;
+    }
+
+    /* Frame slider track */
+    .frame-slider {
+      -webkit-appearance: none;
+      appearance: none;
+      background: transparent;
+      outline: none;
+      padding: 0;
+      margin: 0;
+    }
+    .frame-slider::-webkit-slider-runnable-track {
+      height: 2px;
+      background: #DDD8CE;
+      border-radius: 1px;
+    }
+    .frame-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: #4A6741;
+      margin-top: -6px;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    .frame-slider:active::-webkit-slider-thumb {
+      background: #C4A35A;
+    }
+    /* Vertical slider wrapper */
+    .vslider-wrap {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 56px;
+      height: 100%;
+      overflow: hidden;
+      position: relative;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    window.onerror = function(msg, url, lineNo, columnNo, error) {
+      console.error('GLOBAL ERROR:', msg, error);
+      const root = document.getElementById('root');
+      if (root && root.innerHTML === '') {
+        root.innerHTML = `<div style="padding: 20px; color: #E74C3C; font-family: sans-serif;">
+          <h3>Critical Application Error</h3>
+          <p>${msg}</p>
+          <small>Check the console for details.</small>
+        </div>`;
+      }
+      return false;
+    };
+
+    // Destructure from UMD globals — no import statements allowed in Babel standalone
+    const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+    // ---------------------------------------------------------------------------
+    // useDraggable Hook
+    // ---------------------------------------------------------------------------
+    function useDraggable(initialX, initialY) {
+      const [pos, setPos] = useState({ x: initialX, y: initialY });
+      const [dragging, setDragging] = useState(false);
+      const dragRef = useRef({ offsetX: 0, offsetY: 0 });
+
+      const onMouseDown = useCallback((e) => {
+        // Only drag if left click and not on a button/input
+        if (e.button !== 0) return;
+        if (['BUTTON', 'INPUT', 'SELECT', 'A'].includes(e.target.tagName)) return;
+        
+        setDragging(true);
+        const rect = e.currentTarget.getBoundingClientRect();
+        dragRef.current = {
+          offsetX: e.clientX - rect.left,
+          offsetY: e.clientY - rect.top,
+        };
+        e.stopPropagation();
+      }, []);
+
+      useEffect(() => {
+        if (!dragging) return;
+
+        const onMouseMove = (e) => {
+          setPos({
+            x: e.clientX - dragRef.current.offsetX,
+            y: e.clientY - dragRef.current.offsetY,
+          });
+        };
+
+        const onMouseUp = () => {
+          setDragging(false);
+        };
+
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+        return () => {
+          window.removeEventListener('mousemove', onMouseMove);
+          window.removeEventListener('mouseup', onMouseUp);
+        };
+      }, [dragging]);
+
+      return { pos, onMouseDown, dragging };
+    }
+
+    // ---------------------------------------------------------------------------
+    // Design tokens
+    // ---------------------------------------------------------------------------
+    const T = {
+      bg:           '#FAF8F5',
+      panelBg:      '#F5F2EC',
+      border:       '#DDD8CE',
+      accent:       '#4A6741',
+      gold:         '#C4A35A',
+      text:         '#3D3530',
+      textMuted:    '#8A8078',
+      fontMono:     '"DM Mono", monospace',
+      fontSerif:    '"Playfair Display", Georgia, serif',
+    };
+
+    // ---------------------------------------------------------------------------
+    // hexToRgba
+    // ---------------------------------------------------------------------------
+    function hexToRgba(hex, alpha) {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    // ---------------------------------------------------------------------------
+    // AnatomySchematic
+    // ---------------------------------------------------------------------------
+    function AnatomySchematic({ topAngle, sideAngle }) {
+      const canvasRef = useRef(null);
+
+      useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const W = 180, H = 80;
+        canvas.width = W; canvas.height = H;
+
+        ctx.clearRect(0, 0, W, H);
+        ctx.font = '9px "DM Mono", monospace';
+        ctx.textAlign = 'center';
+
+        // --- 1. Top View (XZ) ---
+        const cx1 = 45, cy1 = 40, r = 25;
+        // Brain outline (simplified)
+        ctx.strokeStyle = '#DDD8CE'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.ellipse(cx1, cy1, r*0.8, r, 0, 0, Math.PI*2); ctx.stroke();
+        ctx.fillStyle = '#AAA098'; ctx.fillText('TOP VIEW', cx1, cy1 - r - 5);
+        
+        // Coronal line (horizontal)
+        ctx.setLineDash([2, 2]);
+        ctx.beginPath(); ctx.moveTo(cx1 - r, cy1); ctx.lineTo(cx1 + r, cy1); ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Oblique line
+        const topRad = (topAngle * Math.PI) / 180;
+        const lx = Math.cos(topRad) * r, ly = -Math.sin(topRad) * r;
+        ctx.strokeStyle = '#4A90D9'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(cx1 - lx, cy1 - ly); ctx.lineTo(cx1 + lx, cy1 + ly); ctx.stroke();
+        ctx.fillStyle = '#4A90D9'; ctx.fillText(`${topAngle}\u00b0`, cx1 + lx*1.2, cy1 + ly*1.2 + 4);
+
+        // --- 2. Side View (YZ) ---
+        const cx2 = 135, cy2 = 40;
+        // Brain outline (simplified)
+        ctx.strokeStyle = '#DDD8CE'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.ellipse(cx2, cy2, r, r*0.7, 0, 0, Math.PI*2); ctx.stroke();
+        ctx.fillStyle = '#AAA098'; ctx.fillText('SIDE VIEW', cx2, cy2 - r - 5);
+
+        // Coronal line (vertical)
+        ctx.setLineDash([2, 2]);
+        ctx.beginPath(); ctx.moveTo(cx2, cy2 - r); ctx.lineTo(cx2, cy2 + r); ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Oblique line
+        const sideRad = (sideAngle * Math.PI) / 180;
+        const sx = Math.sin(sideRad) * r, sy = -Math.cos(sideRad) * r;
+        ctx.strokeStyle = '#4A90D9'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(cx2 - sx, cy2 - sy); ctx.lineTo(cx2 + sx, cy2 + sy); ctx.stroke();
+        ctx.fillStyle = '#4A90D9'; ctx.fillText(`${sideAngle}\u00b0`, cx2 + sx*1.2, cy2 + sy*1.2 + 4);
+
+      }, [topAngle, sideAngle]);
+
+      return <canvas ref={canvasRef} style={{ width: 180, height: 80, display: 'block', margin: '0 auto' }} />;
+    }
+
+    // ---------------------------------------------------------------------------
+    // DistanceMeter
+    // ---------------------------------------------------------------------------
+    function DistanceMeter({ apPosition, atlasVersion }) {
+      const scale = atlasVersion === 'p4' ? 0.57 : 1.0;
+      const centerOffset = 6500 * scale;
+      const totalAP = centerOffset * 2;
+      
+      const distR = (apPosition + centerOffset) / 1000;
+      const distC = (centerOffset - apPosition) / 1000;
+      const pct = ((apPosition + centerOffset) / totalAP) * 100;
+
+      return (
+        <div style={{ padding: '0 10px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+            <div style={{ textAlign: 'left' }}>
+              <div style={{ fontFamily: '"DM Mono", monospace', fontSize: 8, color: '#AAA098' }}>ROSTRAL</div>
+              <div style={{ fontFamily: '"DM Mono", monospace', fontSize: 11, fontWeight: 600, color: '#5A5450' }}>{distR.toFixed(2)}mm</div>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontFamily: '"DM Mono", monospace', fontSize: 8, color: '#AAA098' }}>CAUDAL</div>
+              <div style={{ fontFamily: '"DM Mono", monospace', fontSize: 11, fontWeight: 600, color: '#5A5450' }}>{distC.toFixed(2)}mm</div>
+            </div>
+          </div>
+          
+          <div style={{ height: 4, background: '#DDD8CE', borderRadius: 2, position: 'relative', marginBottom: 4 }}>
+            {/* Range markers */}
+            <div style={{ position: 'absolute', left: 0, top: -2, width: 1, height: 8, background: '#AAA098' }} />
+            <div style={{ position: 'absolute', right: 0, top: -2, width: 1, height: 8, background: '#AAA098' }} />
+            
+            {/* Slice position indicator */}
+            <div style={{ 
+              position: 'absolute', left: `${pct}%`, top: -4, 
+              width: 2, height: 12, background: '#4A90D9',
+              boxShadow: '0 0 4px rgba(74,144,217,0.4)',
+              transition: 'left 0.2s ease-out'
+            }} />
+          </div>
+          <div style={{ textAlign: 'center', fontFamily: '"DM Mono", monospace', fontSize: 8, color: '#AAA098' }}>
+            TOTAL DEPTH: {(totalAP / 1000).toFixed(1)}mm
+          </div>
+        </div>
+      );
+    }
+
+    // ---------------------------------------------------------------------------
+    // SliderPill
+    // ---------------------------------------------------------------------------
+    function SliderPill({ value, unit }) {
+      const display = (value >= 0 ? '+' : '') + value + unit;
+      return (
+        <div style={{
+          position: 'absolute', right: 0, top: -18,
+          fontFamily: '"DM Mono", monospace', fontSize: 10,
+          background: '#FAF8F5', border: '1px solid #DDD8CE',
+          borderRadius: 10, padding: '1px 5px', color: '#5A5450',
+          pointerEvents: 'none', whiteSpace: 'nowrap',
+        }}>
+          {display}
+        </div>
+      );
+    }
+
+    // ---------------------------------------------------------------------------
+    // renderMiniSlice
+    // ---------------------------------------------------------------------------
+    function renderMiniSlice(entry, w = 60, h = 45) {
+      const THREE = window.THREE;
+      if (!THREE || !entry.sliceResult || !entry.sliceResult.intersections || !entry.sliceResult.intersections.length) return null;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+
+      ctx.fillStyle = '#FAF8F5';
+      ctx.fillRect(0, 0, w, h);
+
+      const sr = entry.sliceResult;
+      const normal = sr.plane.normal;
+      const up = Math.abs(normal.y) < 0.99 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+      const uAxis = new THREE.Vector3().crossVectors(up, normal).normalize();
+      const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
+
+      let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+      sr.intersections.forEach(ix => {
+        ix.segments.forEach(seg => {
+          ['start', 'end'].forEach(k => {
+            const u =  seg[k].dot(uAxis);
+            const v = -seg[k].dot(vAxis);
+            if (u < uMin) uMin = u; if (u > uMax) uMax = u;
+            if (v < vMin) vMin = v; if (v > vMax) vMax = v;
+          });
+        });
+      });
+
+      const rangeU = uMax - uMin || 1;
+      const rangeV = vMax - vMin || 1;
+      // Auto-fit scale — same formula as full renderSlice2D (carry-forward constraint)
+      const scale = Math.min((w * 0.85) / rangeU, (h * 0.85) / rangeV);
+      const cx = w / 2 - ((uMin + uMax) / 2) * scale;
+      const cy = h / 2 + ((vMin + vMax) / 2) * scale;
+
+      sr.intersections.forEach(ix => {
+        ctx.strokeStyle = ix.color;
+        ctx.lineWidth = 1;
+        ix.segments.forEach(seg => {
+          ctx.beginPath();
+          ctx.moveTo( seg.start.dot(uAxis) * scale + cx, -seg.start.dot(vAxis) * scale + cy);
+          ctx.lineTo( seg.end.dot(uAxis)   * scale + cx, -seg.end.dot(vAxis)   * scale + cy);
+          ctx.stroke();
+        });
+      });
+
+      return canvas.toDataURL('image/png');
+    }
+
+    // ---------------------------------------------------------------------------
+    // CCF_STRUCTURES Registries (Adult vs P4)
+    // ---------------------------------------------------------------------------
+    const ADULT_STRUCTURES_RAW = [
+      // ---- THALAMUS -----------------------------------------------------------
+      { id:733,  acronym:'VPM',     label:'Ventral posteromedial nucleus',
+        color:'#FF6B6B', group:'thalamus',
+        center_ccf:[6000,4200,5200], semi_axes:[500,400,400], euler_ccf:[0,0,0] },
+      { id:718,  acronym:'VPL',     label:'Ventral posterolateral nucleus',
+        color:'#FF8E53', group:'thalamus',
+        center_ccf:[6000,4300,4400], semi_axes:[550,400,450], euler_ccf:[0,0,0] },
+      { id:149,  acronym:'LP',      label:'Lateral posterior nucleus',
+        color:'#FFA07A', group:'thalamus',
+        center_ccf:[5600,3900,4800], semi_axes:[450,380,380], euler_ccf:[0,0,0] },
+      { id:1020, acronym:'PO',      label:'Posterior complex',
+        color:'#FFB347', group:'thalamus',
+        center_ccf:[6300,4200,5500], semi_axes:[400,350,350], euler_ccf:[0,0,0] },
+      { id:362,  acronym:'MD',      label:'Mediodorsal nucleus',
+        color:'#FF69B4', group:'thalamus',
+        center_ccf:[5600,3700,5600], semi_axes:[600,450,500], euler_ccf:[0,0,0] },
+      { id:262,  acronym:'RT',      label:'Reticular nucleus',
+        color:'#DA70D6', group:'thalamus',
+        center_ccf:[5800,4000,4800], semi_axes:[700,180,600], euler_ccf:[0,0,0] },
+
+      // ---- CORTEX -------------------------------------------------------------
+      { id:329,  acronym:'SSp',     label:'Primary somatosensory area',
+        color:'#2ECC71', group:'cortex',
+        center_ccf:[3800,1800,3500], semi_axes:[900,600,800], euler_ccf:[0,0,0] },
+      { id:981,  acronym:'SSp-bfd', label:'Barrel field',
+        color:'#27AE60', group:'cortex',
+        center_ccf:[3500,2000,3200], semi_axes:[500,450,500], euler_ccf:[0,0,0] },
+      { id:985,  acronym:'MOp',     label:'Primary motor area',
+        color:'#1ABC9C', group:'cortex',
+        center_ccf:[2200,1500,4600], semi_axes:[1000,600,900], euler_ccf:[0,0,0] },
+      { id:1011, acronym:'VISp',    label:'Primary visual area',
+        color:'#16A085', group:'cortex',
+        center_ccf:[7000,2200,4200], semi_axes:[700,550,650], euler_ccf:[0,0,0] },
+      { id:1002, acronym:'AUDp',    label:'Primary auditory area',
+        color:'#48C9B0', group:'cortex',
+        center_ccf:[5000,2500,3200], semi_axes:[650,500,550], euler_ccf:[0,0,0] },
+
+      // ---- FIBER TRACTS -------------------------------------------------------
+      { id:776,  acronym:'ic',      label:'Internal capsule',
+        color:'#BDC3C7', group:'fiber',
+        center_ccf:[5500,4000,4800], semi_axes:[1000,180,300], euler_ccf:[0,0,0] },
+      { id:1000, acronym:'cc',      label:'Corpus callosum',
+        color:'#D5D8DC', group:'fiber',
+        center_ccf:[4000,2600,5700], semi_axes:[2500,150,1000], euler_ccf:[0,0,0] },
+      { id:901,  acronym:'ec',      label:'External capsule',
+        color:'#AAB7B8', group:'fiber',
+        center_ccf:[4800,3200,3800], semi_axes:[1100,150,250], euler_ccf:[0,0,0] },
+
+      // ---- HIPPOCAMPUS --------------------------------------------------------
+      { id:375,  acronym:'CA1',     label:"Ammon's horn CA1",
+        color:'#8E44AD', group:'hippocampus',
+        center_ccf:[5500,3200,4200], semi_axes:[900,280,500], euler_ccf:[0,0,0] },
+      { id:463,  acronym:'CA3',     label:"Ammon's horn CA3",
+        color:'#9B59B6', group:'hippocampus',
+        center_ccf:[5200,3400,4800], semi_axes:[650,280,420], euler_ccf:[0,0,0] },
+      { id:726,  acronym:'DG',      label:'Dentate gyrus',
+        color:'#BB8FCE', group:'hippocampus',
+        center_ccf:[5400,3500,4500], semi_axes:[750,320,500], euler_ccf:[0,0,0] },
+
+      // ---- SUBCORTICAL --------------------------------------------------------
+      { id:672,  acronym:'CP',      label:'Caudoputamen',
+        color:'#F39C12', group:'subcortical',
+        center_ccf:[3800,3200,4800], semi_axes:[1100,850,1000], euler_ccf:[0,0,0] },
+      { id:381,  acronym:'SNr',     label:'Substantia nigra reticular',
+        color:'#E67E22', group:'subcortical',
+        center_ccf:[7500,4600,5500], semi_axes:[600,280,480], euler_ccf:[0,0,0] },
+    ];
+
+    // P4 Approximation (scaled down ~57% to match 7.5mm AP goal)
+    const P4_STRUCTURES_RAW = ADULT_STRUCTURES_RAW.map(s => {
+      const scale = 0.57; // Adjusted from 0.62 to meet 7.5mm AP goal
+      return {
+        ...s,
+        center_ccf: s.center_ccf.map(v => Math.round(v * scale)),
+        semi_axes:  s.semi_axes.map(v => Math.round(v * scale)),
+      };
+    });
+
+    const ROOT_MESH_ID = 997;
+
+    // Registry helper
+    function getRegistry(version = 'p4') {
+      const raw = version === 'p4' ? P4_STRUCTURES_RAW : ADULT_STRUCTURES_RAW;
+      const frozen = Object.freeze(raw.map(s => Object.freeze({ ...s })));
+      const byAcronym = Object.freeze(Object.fromEntries(frozen.map(s => [s.acronym, s])));
+      const byGroup = Object.freeze(frozen.reduce((acc, s) => {
+        if (!acc[s.group]) acc[s.group] = [];
+        acc[s.group].push(s.acronym);
+        return acc;
+      }, {}));
+      return { structures: frozen, byAcronym, byGroup };
+    }
+
+    // Default to P4
+    let CURRENT_REGISTRY = getRegistry('p4');
+    let CCF_STRUCTURES   = CURRENT_REGISTRY.structures;
+    let CCF_BY_ACRONYM   = CURRENT_REGISTRY.byAcronym;
+    let CCF_BY_GROUP     = CURRENT_REGISTRY.byGroup;
+
+    function switchAtlasVersion(version) {
+      CURRENT_REGISTRY = getRegistry(version);
+      CCF_STRUCTURES   = CURRENT_REGISTRY.structures;
+      CCF_BY_ACRONYM   = CURRENT_REGISTRY.byAcronym;
+      CCF_BY_GROUP     = CURRENT_REGISTRY.byGroup;
+    }
+
+    const GROUP_COLORS = Object.freeze({
+      thalamus:    '#FF6B6B',
+      cortex:      '#2ECC71',
+      fiber:       '#BDC3C7',
+      hippocampus: '#8E44AD',
+      subcortical: '#F39C12',
+    });
+
+    // ---------------------------------------------------------------------------
+    // Coordinate Utilities
+    // ---------------------------------------------------------------------------
+    function ccfToThree(ccfX, ccfY, ccfZ, scale = 1.0) {
+      if (!isFinite(ccfX) || !isFinite(ccfY) || !isFinite(ccfZ)) {
+        throw new Error(`ccfToThree: non-finite input (${ccfX}, ${ccfY}, ${ccfZ})`);
+      }
+      return {
+        x:  ccfZ - 5700 * scale,
+        y: -(ccfY - 4000 * scale),
+        z: -(ccfX - 5700 * scale),
+      };
+    }
+
+    // ---------------------------------------------------------------------------
+    // buildSlicePlane v3 — Stage 6 axis remapping preserved
+    // Stage 6 FIX 1: roll→Euler X (somersault), yaw→Euler Y, pitch→Euler Z (axial spin)
+    // All axes raw µm — no /1000 (carry-forward invariant)
+    // ---------------------------------------------------------------------------
+    function buildSlicePlane(pitch, yaw, roll, apMicrons, lrMicrons = 0, dvMicrons = 0) {
+      const THREE = window.THREE;
+      const euler = new THREE.Euler(
+        THREE.MathUtils.degToRad(roll),
+        THREE.MathUtils.degToRad(yaw),
+        THREE.MathUtils.degToRad(pitch),
+        'XYZ'
+      );
+      const normal = new THREE.Vector3(0, 0, 1);
+      const rotMat = new THREE.Matrix4().makeRotationFromEuler(euler);
+      normal.applyMatrix4(rotMat).normalize();
+
+      // Translation: all axes in raw µm (1 µm = 1 Three.js unit). No /1000.
+      const center = new THREE.Vector3(
+        lrMicrons,
+        -dvMicrons,
+        -apMicrons
+      );
+      return new THREE.Plane().setFromNormalAndCoplanarPoint(normal, center);
+    }
+
+    // ---------------------------------------------------------------------------
+    // intersectMeshWithPlane — edgeIntersect: >= 0 positive-side convention (carry-forward)
+    // ---------------------------------------------------------------------------
+    function intersectMeshWithPlane(mesh, plane) {
+      const THREE = window.THREE;
+      const geo      = mesh.geometry;
+      const posAttr  = geo.attributes.position;
+      const index    = geo.index;
+      const segments = [];
+
+      const vertexCount = index ? index.count : posAttr.count;
+      const triCount    = Math.floor(vertexCount / 3);
+
+      function edgeIntersect(v1, v2, d1, d2, pts) {
+        if (d1 === 0 && d2 === 0) return;
+        // >= 0 positive-side convention — carry-forward from Stage 2 (DEBUG_REPORT_2 M-01)
+        const s1 = d1 >= 0 ? 1 : -1;
+        const s2 = d2 >= 0 ? 1 : -1;
+        if (s1 === s2) return;
+        const t = d1 / (d1 - d2);
+        pts.push(new THREE.Vector3().lerpVectors(v1, v2, t));
+      }
+
+      for (let i = 0; i < triCount; i++) {
+        const ia = index ? index.getX(i * 3)     : i * 3;
+        const ib = index ? index.getX(i * 3 + 1) : i * 3 + 1;
+        const ic = index ? index.getX(i * 3 + 2) : i * 3 + 2;
+
+        const vA = new THREE.Vector3()
+          .fromBufferAttribute(posAttr, ia)
+          .applyMatrix4(mesh.matrixWorld);
+        const vB = new THREE.Vector3()
+          .fromBufferAttribute(posAttr, ib)
+          .applyMatrix4(mesh.matrixWorld);
+        const vC = new THREE.Vector3()
+          .fromBufferAttribute(posAttr, ic)
+          .applyMatrix4(mesh.matrixWorld);
+
+        const dA = plane.distanceToPoint(vA);
+        const dB = plane.distanceToPoint(vB);
+        const dC = plane.distanceToPoint(vC);
+
+        const pts = [];
+        edgeIntersect(vA, vB, dA, dB, pts);
+        edgeIntersect(vB, vC, dB, dC, pts);
+        edgeIntersect(vC, vA, dC, dA, pts);
+
+        if (pts.length === 2) {
+          segments.push({ start: pts[0], end: pts[1] });
+        }
+      }
+
+      return segments;
+    }
+
+    const GROUP_SORT_ORDER = ['thalamus', 'cortex', 'fiber', 'hippocampus', 'subcortical'];
+
+    function computeAllIntersections(meshes, plane) {
+      const THREE = window.THREE;
+      const results = [];
+
+      meshes.forEach(mesh => {
+        if (!mesh.visible) return;
+        if (!mesh.userData || !mesh.userData.acronym) return;
+
+        const segments = intersectMeshWithPlane(mesh, plane);
+        if (segments.length === 0) return;
+
+        const centroid = new THREE.Vector3();
+        segments.forEach(seg => {
+          centroid.x += (seg.start.x + seg.end.x) / 2;
+          centroid.y += (seg.start.y + seg.end.y) / 2;
+          centroid.z += (seg.start.z + seg.end.z) / 2;
+        });
+        centroid.divideScalar(segments.length);
+
+        results.push({
+          acronym:  mesh.userData.acronym,
+          name:     mesh.userData.label  || mesh.userData.acronym,
+          color:    mesh.userData.color  || '#888888',
+          group:    mesh.userData.group  || 'subcortical',
+          segments,
+          centroid,
+        });
+      });
+
+      results.sort((a, b) => {
+        const ai = GROUP_SORT_ORDER.indexOf(a.group);
+        const bi = GROUP_SORT_ORDER.indexOf(b.group);
+        return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+      });
+
+      return results;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Preset Engine
+    // Stage 6 FIX 1: TC preset roll:-35 (Euler X somersault)
+    // ---------------------------------------------------------------------------
+    const PRESETS = Object.freeze({
+      tc: Object.freeze({
+        pitch: 0, yaw: 0, roll: -35, apPosition: 0,
+        highlighted: ['VPM','VPL','LP','ic','SSp','SSp-bfd','MOp'],
+      }),
+      hippo: Object.freeze({
+        pitch: 0, yaw: 15, roll: 0, apPosition: 0,
+        highlighted: ['CA1','CA3','DG'],
+      }),
+    });
+
+    function applyPreset(presetName, currentThickness, setSliceState, setHighlightState) {
+      if (!Object.prototype.hasOwnProperty.call(PRESETS, presetName)) {
+        throw new Error(`applyPreset: unrecognized presetName "${presetName}"`);
+      }
+      const p = PRESETS[presetName];
+      setSliceState(prev => ({
+        ...prev,
+        pitch:      p.pitch,
+        yaw:        p.yaw,
+        roll:       p.roll,
+        apPosition: p.apPosition,
+      }));
+      setHighlightState({ preset: presetName, highlighted: p.highlighted });
+    }
+
+    function toggleGroup(groupName, visible, meshMapRef, setVisibility) {
+      if (!Object.prototype.hasOwnProperty.call(CCF_BY_GROUP, groupName)) {
+        throw new Error(`toggleGroup: unrecognized groupName "${groupName}"`);
+      }
+      const members = CCF_BY_GROUP[groupName];
+      members.forEach(acronym => {
+        const mesh = meshMapRef.current[acronym];
+        if (!mesh) { console.warn(`toggleGroup: acronym "${acronym}" not found in mesh map`); return; }
+        mesh.visible = visible;
+      });
+      setVisibility(prev => {
+        const next = { ...prev };
+        members.forEach(a => { next[a] = visible; });
+        return next;
+      });
+    }
+
+    function makeInitialVisibility() {
+      return Object.fromEntries(CCF_STRUCTURES.map(s => [s.acronym, true]));
+    }
+
+    function makeInitialGroupVisibility() {
+      return Object.fromEntries(Object.keys(CCF_BY_GROUP).map(g => [g, true]));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Thickness stack constants
+    // ---------------------------------------------------------------------------
+    const THICKNESS_STACK_COUNT = Object.freeze({
+      '350µm': 1, '400µm': 1, '1mm': 3, '2mm': 5, '4mm': 8, '6mm': 12,
+    });
+
+    const THICKNESS_TO_MICRONS = Object.freeze({
+      '350µm': 350, '400µm': 400, '1mm': 1000, '2mm': 2000, '4mm': 4000, '6mm': 6000,
+    });
+
+    // ---------------------------------------------------------------------------
+    // Main Component
+    // ---------------------------------------------------------------------------
+    function AllenAtlasSlicePlanner() {
+      console.log('AllenAtlasSlicePlanner: rendering component cycle...');
+      // ---- Shared state -------------------------------------------------------
+      const [sliceState, setSliceState] = useState({
+        pitch:      0,
+        yaw:        0,
+        roll:       0,
+        apPosition: 0,
+        lrPosition: 0,
+        dvPosition: 0,
+        thickness:  400,
+      });
+
+      const [highlightState, setHighlightState] = useState({
+        preset:      null,
+        highlighted: [],
+      });
+
+      const [visibilityState, setVisibilityState] = useState(makeInitialVisibility);
+      const [groupVisibility,  setGroupVisibility]  = useState(makeInitialGroupVisibility);
+
+      // Stage 7 coordinate scale: initial radius 18000 (slightly wider)
+      const [cameraState, setCameraState] = useState({
+        theta:  Math.PI / 6,
+        phi:    Math.PI / 3,
+        radius: 18000,
+      });
+
+      const [selectedThickness, setSelectedThickness] = useState('400µm');
+      const [panelExpanded,  setPanelExpanded]  = useState(true);
+      const [expandedGroups, setExpandedGroups] = useState({
+        thalamus: true, cortex: true, fiber: false, hippocampus: false, subcortical: false,
+      });
+
+      // Draggable UI hooks
+      const structuresPanelDrag = useDraggable(12, 12);
+
+      const [sliceResult, setSliceResult] = useState(null);
+      const [tooltip, setTooltip] = useState(null);
+
+      const [sceneReady,     setSceneReady]     = useState(false);
+      const [meshLoadState,  setMeshLoadState]  = useState({ total: 0, loaded: 0, failed: 0 });
+
+      const [viewLocked, setViewLocked] = useState(false);
+
+      const [savedSlices,          setSavedSlices]          = useState([]);
+      const [saveNameInput,        setSaveNameInput]        = useState('');
+      const [showSaveInput,        setShowSaveInput]        = useState(false);
+      const [importMsg,            setImportMsg]            = useState('');
+      const [savedSlicesPanelOpen, setSavedSlicesPanelOpen] = useState(true);
+      const [webglError,           setWebglError]           = useState(false);
+
+      // Resizable panels
+      const [leftWidth, setLeftWidth] = useState(60); // percentage
+      const isResizingRef = useRef(false);
+
+      const onResizeMouseDown = useCallback((e) => {
+        isResizingRef.current = true;
+        document.body.style.cursor = 'col-resize';
+        e.preventDefault();
+      }, []);
+
+      useEffect(() => {
+        const onMouseMove = (e) => {
+          if (!isResizingRef.current) return;
+          const percentage = (e.clientX / window.innerWidth) * 100;
+          setLeftWidth(Math.max(30, Math.min(80, percentage)));
+        };
+        const onMouseUp = () => {
+          if (!isResizingRef.current) return;
+          isResizingRef.current = false;
+          document.body.style.cursor = 'default';
+        };
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+        return () => {
+          window.removeEventListener('mousemove', onMouseMove);
+          window.removeEventListener('mouseup', onMouseUp);
+        };
+      }, []);
+
+      useEffect(() => {
+        if (!rendererRef.current || !cameraRef.current || !mountRef.current) return;
+        const nw = mountRef.current.clientWidth;
+        const nh = mountRef.current.clientHeight;
+        rendererRef.current.setSize(nw, nh);
+        cameraRef.current.aspect = nw / nh;
+        cameraRef.current.updateProjectionMatrix();
+      }, [leftWidth]);
+
+      // 2D Slice Interaction State
+      const [slice2DOrbit, setSlice2DOrbit] = useState({ panX: 0, panY: 0, zoom: 1 });
+      const [slice2DHover, setSlice2DHover] = useState(null); // { acronym, name, group }
+      const slice2DRef = useRef({ isDown: false, lastX: 0, lastY: 0 });
+
+      // Pages/static deployments default to the built-in ellipsoid mode.
+      const shouldProbeBackend =
+        ['localhost', '127.0.0.1'].includes(window.location.hostname) &&
+        window.location.port === '8000';
+      const [backendStatus, setBackendStatus] = useState(shouldProbeBackend ? 'checking' : 'offline'); // 'checking'|'ok'|'offline'
+
+      // P4 Standard support
+      const [atlasVersion, setAtlasVersion] = useState('p4'); // 'p4' | 'adult'
+
+      // ---- Refs ---------------------------------------------------------------
+      const mountRef           = useRef(null);
+      const axisCanvasRef      = useRef(null);
+      const sliceCanvasRef     = useRef(null);
+      const meshMapRef         = useRef({});
+      const shellRef           = useRef(null);
+      const planeRef           = useRef(null);
+      const planeEdgesRef      = useRef(null);
+      const rendererRef        = useRef(null);
+      const sceneRef           = useRef(null);
+      const cameraRef          = useRef(null);
+      const frameRef           = useRef(null);
+      const structureMeshesRef = useRef([]);
+      const slicePlaneGroupRef = useRef([]);
+      const labelOverlayRef    = useRef(null);
+      const meshLoadStateRef   = useRef({ total: 0, loaded: 0, failed: 0 });
+      const rightPanelRef      = useRef(null);
+      const importFileRef      = useRef(null);
+
+      const rollSliderRef = useRef(null);
+      const dvSliderRef   = useRef(null);
+
+      const viewLockedRef    = useRef(false);
+      const lerpTargetPos    = useRef(null);
+      const isLerping        = useRef(false);
+
+      // Stage 7 coordinate scale: initial radius 16000
+      const orbitRef = useRef({
+        isPointerDown: false,
+        lastX: 0, lastY: 0,
+        theta:  Math.PI / 6,
+        phi:    Math.PI / 3,
+        radius: 16000,
+        targetX: 0, targetY: 0, targetZ: 0,
+        spherical: { phi: Math.PI / 3, theta: Math.PI / 6 },
+      });
+
+      const sliceStateRef = useRef(sliceState);
+      useEffect(() => { sliceStateRef.current = sliceState; }, [sliceState]);
+
+      const visibilityRef = useRef(visibilityState);
+      useEffect(() => { visibilityRef.current = visibilityState; }, [visibilityState]);
+
+      const highlightRef = useRef(highlightState);
+      useEffect(() => { highlightRef.current = highlightState; }, [highlightState]);
+
+      const lastRaycastTime = useRef(0);
+
+      // ---- Backend health check (Stage 7) ------------------------------------
+      useEffect(() => {
+        if (!shouldProbeBackend) return;
+        fetch('health', { signal: AbortSignal.timeout(3000) })
+          .then(r => r.ok ? setBackendStatus('ok') : setBackendStatus('offline'))
+          .catch(() => setBackendStatus('offline'));
+      }, [shouldProbeBackend]);
+// ---- Three.js scene init ------------------------------------------------
+useEffect(() => {
+  const THREE = window.THREE;
+  if (!THREE) {
+    console.error('Three.js not found on window.THREE — ensure CDN script is loaded');
+    return;
+  }
+
+  // Apply registry switch
+  switchAtlasVersion(atlasVersion);
+
+  const mount = mountRef.current;
+  // Stage 7: lerpTargetPos at (4000,-2000,8000) — locked specimen-stage view in raw µm
+  lerpTargetPos.current = new THREE.Vector3(4000, -2000, 8000);
+
+  const w = mount.clientWidth;
+  const h = mount.clientHeight;
+
+        // --- Renderer ---
+        let renderer;
+        try {
+          renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        } catch (e) {
+          console.error('WebGL Initialization failed:', e);
+          setWebglError(true);
+          return;
+        }
+
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(w, h);
+        renderer.sortObjects = true;
+        mount.appendChild(renderer.domElement);
+        rendererRef.current = renderer;
+
+        // --- Scene ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color('#FAF8F5');
+        sceneRef.current = scene;
+
+        // --- Camera ---
+        // Stage 7: far=100000 (raw µm scale; CCF brain is ~14000µm AP × ~8000µm DV)
+        const camera = new THREE.PerspectiveCamera(45, w / h, 1, 100000);
+        const { theta, phi, radius } = orbitRef.current;
+        camera.position.set(
+          radius * Math.sin(phi) * Math.sin(theta),
+          radius * Math.cos(phi),
+          radius * Math.sin(phi) * Math.cos(theta),
+        );
+        camera.lookAt(0, 0, 0);
+        cameraRef.current = camera;
+
+        // --- Lights ---
+        const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambient);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(1, 2, 3);
+        scene.add(dirLight);
+
+        // --- Brain shell (renderOrder 0) ---
+        // Stage 7: makeScale(5700,4000,6500) — full CCF half-extents in raw µm
+        // (CCF volume: ~11400µm L/R × ~8000µm D/V × ~13000µm A/P; half-extents ≈ 5700×4000×6500)
+        const shellScale = atlasVersion === 'p4' ? 0.57 : 1.0;
+        const shellGeo = new THREE.SphereGeometry(1, 48, 32);
+        shellGeo.applyMatrix4(new THREE.Matrix4().makeScale(5700 * shellScale, 4000 * shellScale, 6500 * shellScale));
+        const shellMat = new THREE.MeshPhongMaterial({
+          color: new THREE.Color('#BBBBBB'), opacity: 0.06,
+          transparent: true, side: THREE.DoubleSide, depthWrite: false,
+        });
+        const shell = new THREE.Mesh(shellGeo, shellMat);
+        shell.renderOrder = 0;
+        scene.add(shell);
+        shellRef.current = shell;
+
+        // --- Structure meshes (renderOrder 1 default) ---
+        structureMeshesRef.current = [];
+        const meshMap = {};
+        const atlasScale = atlasVersion === 'p4' ? 0.57 : 1.0;
+        CCF_STRUCTURES.forEach(s => {
+          const [rx, ry, rz] = s.semi_axes;
+          const geo = new THREE.SphereGeometry(1, 32, 24);
+          geo.applyMatrix4(new THREE.Matrix4().makeScale(rx, ry, rz));
+          const mat = new THREE.MeshPhongMaterial({
+            color: new THREE.Color(s.color), opacity: 0.70,
+            transparent: true, side: THREE.DoubleSide, depthWrite: false,
+          });
+          const mesh = new THREE.Mesh(geo, mat);
+          const pos  = ccfToThree(...s.center_ccf, atlasScale);
+          mesh.position.set(pos.x, pos.y, pos.z);
+          mesh.renderOrder = 1;
+          mesh.userData = { acronym: s.acronym, label: s.label, color: s.color, group: s.group };
+          scene.add(mesh);
+          meshMap[s.acronym] = mesh;
+          structureMeshesRef.current.push(mesh);
+        });
+        meshMapRef.current = meshMap;
+
+        // --- Slice plane widget (renderOrder 3) ---
+        // Stage 7: PlaneGeometry(11000,8000) — matches brain cross-section in raw µm
+        const planeGeo = new THREE.PlaneGeometry(11000, 8000);
+        const planeMat = new THREE.MeshBasicMaterial({
+          color: new THREE.Color('#4A90D9'), opacity: 0.22,
+          transparent: true, side: THREE.DoubleSide, depthWrite: false,
+        });
+        const planeMesh = new THREE.Mesh(planeGeo, planeMat);
+        planeMesh.renderOrder = 3;
+        scene.add(planeMesh);
+        planeRef.current = planeMesh;
+
+        // --- EdgesGeometry border lines ---
+        // Stage 7: EdgesGeometry also updated to match PlaneGeometry(11000,8000)
+        const edgesGeo  = new THREE.EdgesGeometry(new THREE.PlaneGeometry(11000, 8000));
+        const edgesMat  = new THREE.LineBasicMaterial({ color: '#4A90D9', linewidth: 1 });
+        const planeEdges = new THREE.LineSegments(edgesGeo, edgesMat);
+        planeEdges.renderOrder = 3;
+        scene.add(planeEdges);
+        planeEdgesRef.current = planeEdges;
+
+        // --- Animation loop ---
+        const animate = () => {
+          frameRef.current = requestAnimationFrame(animate);
+
+          const vis   = visibilityRef.current;
+          const hi    = highlightRef.current;
+          const hiSet = new Set(hi.highlighted);
+
+          // Use meshMapRef.current to get the latest mesh objects (including PLY swaps)
+          const currentMeshMap = meshMapRef.current || {};
+          Object.entries(currentMeshMap).forEach(([acronym, mesh]) => {
+            mesh.visible = vis[acronym] !== false;
+            if (!mesh.visible) return;
+
+            if (hiSet.has(acronym)) {
+              mesh.renderOrder = 2;
+              mesh.material.opacity = 0.92;
+              if (mesh.material.emissive) {
+                mesh.material.emissive = new THREE.Color(mesh.userData.color).multiplyScalar(0.25);
+              }
+            } else if (hi.preset !== null) {
+              mesh.renderOrder = 1;
+              mesh.material.opacity = 0.12;
+              if (mesh.material.emissive) {
+                mesh.material.emissive = new THREE.Color(0x000000);
+              }
+            } else {
+              mesh.renderOrder = 1;
+              mesh.material.opacity = 0.70;
+              if (mesh.material.emissive) {
+                mesh.material.emissive = new THREE.Color(0x000000);
+              }
+            }
+          });
+          // Update slice plane widget position
+          // Stage 6 FIX 1 preserved: roll→Euler X, yaw→Euler Y, pitch→Euler Z
+          // apPosition→-Z, lrPosition→X, dvPosition→-Y; no /1000 (carry-forward invariant)
+          const ss = sliceStateRef.current;
+          if (planeRef.current) {
+            planeRef.current.rotation.set(
+              THREE.MathUtils.degToRad(ss.roll),
+              THREE.MathUtils.degToRad(ss.yaw),
+              THREE.MathUtils.degToRad(ss.pitch)
+            );
+            planeRef.current.position.set(
+              ss.lrPosition,
+              -ss.dvPosition,
+              -ss.apPosition
+            );
+          }
+
+          if (planeEdgesRef.current) {
+            planeEdgesRef.current.rotation.set(
+              THREE.MathUtils.degToRad(ss.roll),
+              THREE.MathUtils.degToRad(ss.yaw),
+              THREE.MathUtils.degToRad(ss.pitch)
+            );
+            planeEdgesRef.current.position.set(
+              ss.lrPosition,
+              -ss.dvPosition,
+              -ss.apPosition
+            );
+          }
+
+          updateCamera();
+
+          // Lerp camera to locked position when viewLocked is active
+          if (isLerping.current && cameraRef.current && lerpTargetPos.current) {
+            const cam = cameraRef.current;
+            cam.position.lerp(lerpTargetPos.current, 0.08);
+            cam.lookAt(0, 0, 0);
+            if (cam.position.distanceTo(lerpTargetPos.current) < 2) {
+              cam.position.copy(lerpTargetPos.current);
+              cam.lookAt(0, 0, 0);
+              isLerping.current = false;
+              // Sync React state once lerp finishes
+              const o = orbitRef.current;
+              // We need to update o.phi/o.theta/o.radius from the new position
+              // if we want the orbit controls to resume correctly.
+              // For now, just trigger a sync of the current state.
+              triggerCameraStateUpdate(); 
+            }
+          }
+
+          renderer.render(scene, camera);
+
+          // 3D overlay labels for highlighted structures
+          const overlayCanvas = labelOverlayRef.current;
+          if (overlayCanvas && highlightRef.current.highlighted.length > 0) {
+            const ow = overlayCanvas.offsetWidth;
+            const oh = overlayCanvas.offsetHeight;
+            if (overlayCanvas.width !== ow || overlayCanvas.height !== oh) {
+              overlayCanvas.width  = ow;
+              overlayCanvas.height = oh;
+            }
+            const octx = overlayCanvas.getContext('2d');
+            octx.clearRect(0, 0, ow, oh);
+
+            highlightRef.current.highlighted.forEach(acronym => {
+              const mesh = meshMap[acronym];
+              if (!mesh || !mesh.visible) return;
+              const vec = mesh.position.clone().project(camera);
+              const sx  = ( vec.x + 1) / 2 * ow;
+              const sy  = (-vec.y + 1) / 2 * oh;
+              const color = mesh.userData.color;
+              octx.beginPath();
+              octx.arc(sx, sy, 3, 0, Math.PI * 2);
+              octx.fillStyle = color;
+              octx.fill();
+              const lx = sx + 15;
+              const ly = sy - 10;
+              octx.font = 'bold 11px "DM Mono", monospace';
+              const m = octx.measureText(acronym);
+              octx.fillStyle = 'rgba(250,248,245,0.90)';
+              octx.beginPath();
+              if (octx.roundRect) {
+                octx.roundRect(lx - 2, ly - 11, m.width + 4, 14, 3);
+              } else {
+                octx.rect(lx - 2, ly - 11, m.width + 4, 14);
+              }
+              octx.fill();
+              octx.strokeStyle = color;
+              octx.lineWidth   = 0.8;
+              octx.globalAlpha = 0.6;
+              octx.beginPath();
+              octx.moveTo(sx, sy);
+              octx.lineTo(lx, ly);
+              octx.stroke();
+              octx.globalAlpha = 1.0;
+              octx.fillStyle = color;
+              octx.fillText(acronym, lx, ly);
+            });
+          } else if (overlayCanvas) {
+            overlayCanvas.getContext('2d').clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+          }
+
+          drawAxisIndicator();
+        }
+
+        animate();
+
+        // --- Resize handler ---
+        function onResize() {
+          const w2 = mount.clientWidth;
+          const h2 = mount.clientHeight;
+          camera.aspect = w2 / h2;
+          camera.updateProjectionMatrix();
+          renderer.setSize(w2, h2);
+        }
+        window.addEventListener('resize', onResize);
+
+        // --- Manual orbit controls ---
+        function updateCamera() {
+          if (viewLockedRef.current && !isLerping.current) return;
+          const o = orbitRef.current;
+          const sinPhi   = Math.sin(o.phi);
+          const cosPhi   = Math.cos(o.phi);
+          const sinTheta = Math.sin(o.theta);
+          const cosTheta = Math.cos(o.theta);
+          camera.position.set(
+            o.targetX + o.radius * sinPhi * sinTheta,
+            o.targetY + o.radius * cosPhi,
+            o.targetZ + o.radius * sinPhi * cosTheta,
+          );
+          camera.lookAt(o.targetX, o.targetY, o.targetZ);
+          // Removed setCameraState from here to avoid excessive React re-renders
+        }
+
+        function triggerCameraStateUpdate() {
+          const o = orbitRef.current;
+          setCameraState({ theta: o.theta, phi: o.phi, radius: o.radius });
+        }
+
+        function onPointerDown(e) {
+          if (viewLockedRef.current) return;
+          const o = orbitRef.current;
+          o.isPointerDown = true;
+          o.lastX = e.clientX;
+          o.lastY = e.clientY;
+          mount.setPointerCapture(e.pointerId);
+        }
+
+        function onPointerMove(e) {
+          if (viewLockedRef.current) return;
+          const o = orbitRef.current;
+          if (!o.isPointerDown) return;
+          const dx = e.clientX - o.lastX;
+          const dy = e.clientY - o.lastY;
+          o.lastX = e.clientX;
+          o.lastY = e.clientY;
+          if (e.shiftKey) {
+            const PAN_SPEED = 0.8;
+            const sinTheta = Math.sin(o.theta);
+            const cosTheta = Math.cos(o.theta);
+            o.targetX -= dx * cosTheta * PAN_SPEED;
+            o.targetZ += dx * sinTheta * PAN_SPEED;
+            o.targetY += dy * PAN_SPEED;
+          } else {
+            const ORBIT_SPEED = 0.005;
+            o.theta -= dx * ORBIT_SPEED;
+            o.phi   -= dy * ORBIT_SPEED;
+            o.phi = Math.max(0.05, Math.min(Math.PI - 0.05, o.phi));
+          }
+          updateCamera();
+          triggerCameraStateUpdate(); // Update React state only on manual orbit
+        }
+
+        function onPointerUp(e) {
+          orbitRef.current.isPointerDown = false;
+          mount.releasePointerCapture(e.pointerId);
+        }
+
+        function onWheel(e) {
+          if (viewLockedRef.current) return;
+          e.preventDefault();
+          orbitRef.current.radius *= (1 + e.deltaY * 0.001);
+          // Stage 7: zoom clamp min=3000, max=40000 (raw µm scale)
+          orbitRef.current.radius = Math.max(3000, Math.min(40000, orbitRef.current.radius));
+          updateCamera();
+          triggerCameraStateUpdate(); // Update React state only on zoom
+        }
+
+        mount.addEventListener('pointerdown',   onPointerDown);
+        mount.addEventListener('pointermove',   onPointerMove);
+        mount.addEventListener('pointerup',     onPointerUp);
+        mount.addEventListener('pointercancel', onPointerUp);
+        mount.addEventListener('wheel', onWheel, { passive: false });
+
+        setSceneReady(true);
+
+        return () => {
+          cancelAnimationFrame(frameRef.current);
+          window.removeEventListener('resize', onResize);
+          mount.removeEventListener('pointerdown',   onPointerDown);
+          mount.removeEventListener('pointermove',   onPointerMove);
+          mount.removeEventListener('pointerup',     onPointerUp);
+          mount.removeEventListener('pointercancel', onPointerUp);
+          mount.removeEventListener('wheel', onWheel);
+          renderer.dispose();
+          if (mount.contains(renderer.domElement)) {
+            mount.removeChild(renderer.domElement);
+          }
+        };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [atlasVersion]); // Re-run when atlas version changes to clear and rebuild scene
+
+      // ---------------------------------------------------------------------------
+      // ResizeObserver — syncs vertical slider width to canvas cell height
+      // ---------------------------------------------------------------------------
+      useEffect(() => {
+        const cell = mountRef.current;
+        if (!cell) return;
+        const ro = new ResizeObserver(entries => {
+          const h = entries[0].contentRect.height;
+          if (rollSliderRef.current) rollSliderRef.current.style.width = h + 'px';
+          if (dvSliderRef.current)   dvSliderRef.current.style.width   = h + 'px';
+        });
+        ro.observe(cell);
+        return () => ro.disconnect();
+      }, []);
+
+      // ---------------------------------------------------------------------------
+      // Ghost plane stack
+      // ---------------------------------------------------------------------------
+      useEffect(() => {
+        const THREE = window.THREE;
+        if (!THREE || !sceneRef.current) return;
+        const scene = sceneRef.current;
+
+        slicePlaneGroupRef.current.forEach(ghost => {
+          ghost.geometry.dispose();
+          ghost.material.dispose();
+          scene.remove(ghost);
+        });
+        slicePlaneGroupRef.current = [];
+
+        const count = THICKNESS_STACK_COUNT[selectedThickness] || 1;
+        if (count <= 1) return;
+
+        const stepMicrons = THICKNESS_TO_MICRONS[selectedThickness] || 400;
+        const halfCount   = Math.floor(count / 2);
+
+        for (let i = -halfCount; i <= halfCount; i++) {
+          if (i === 0) continue;
+          // Stage 7: ghost plane enlarged to match PlaneGeometry(11000,8000)
+          const ghostGeo = new THREE.PlaneGeometry(11000, 8000);
+          const ghostMat = new THREE.MeshBasicMaterial({
+            color: '#4A90D9', opacity: 0.06,
+            transparent: true, side: THREE.DoubleSide, depthWrite: false,
+          });
+          const ghost = new THREE.Mesh(ghostGeo, ghostMat);
+          ghost.renderOrder = 3;
+          // Stage 6 FIX 1 preserved: roll→Euler X, yaw→Y, pitch→Euler Z
+          ghost.rotation.set(
+            THREE.MathUtils.degToRad(sliceState.roll),
+            THREE.MathUtils.degToRad(sliceState.yaw),
+            THREE.MathUtils.degToRad(sliceState.pitch)
+          );
+          // No /1000 — carry-forward invariant
+          ghost.position.set(
+            sliceState.lrPosition,
+            -sliceState.dvPosition,
+            -sliceState.apPosition + i * stepMicrons
+          );
+          scene.add(ghost);
+          slicePlaneGroupRef.current.push(ghost);
+        }
+      }, [sliceState, selectedThickness]);
+
+      // ---------------------------------------------------------------------------
+      // Mesh loading useEffect
+      // ---------------------------------------------------------------------------
+      useEffect(() => {
+        if (!sceneReady) return;
+        const meshSource = backendStatus === 'ok' ? 'backend' : 'static';
+        const structures = CCF_STRUCTURES;
+        const totalCount = structures.length + 1;
+        meshLoadStateRef.current = { total: totalCount, loaded: 0, failed: 0 };
+        setMeshLoadState({ total: totalCount, loaded: 0, failed: 0 });
+
+        function applyCcfToThree(verts, acronym) {
+          const scale = atlasVersion === 'p4' ? 0.57 : 1.0;
+          let nanCount = 0;
+          for (let i = 0; i < verts.length; i += 3) {
+            const cx = verts[i];
+            const cy = verts[i + 1];
+            const cz = verts[i + 2];
+            if (!isFinite(cx) || !isFinite(cy) || !isFinite(cz)) {
+              nanCount++;
+              verts[i] = 0; verts[i+1] = 0; verts[i+2] = 0;
+              continue;
+            }
+            verts[i]     = (cz - 5700) * scale;
+            verts[i + 1] = -(cy - 4000) * scale;
+            verts[i + 2] = -(cx - 5700) * scale;
+          }
+          if (nanCount > 0) console.warn(`Mesh ${acronym} contains ${nanCount} non-finite vertices.`);
+        }
+
+        function onLoaded() {
+          meshLoadStateRef.current.loaded++;
+          setMeshLoadState({ ...meshLoadStateRef.current });
+        }
+
+        function onFailed(targetMesh) {
+          if (targetMesh) targetMesh.visible = true; // Ensure fallback is visible
+          meshLoadStateRef.current.failed++;
+          setMeshLoadState({ ...meshLoadStateRef.current });
+        }
+
+        function finishLoadedMesh(targetMesh, geometry, acronym) {
+          if (!targetMesh) throw new Error(`Target mesh for ${acronym} no longer exists`);
+          const positions = geometry?.attributes?.position?.array;
+          if (!positions || positions.length === 0) {
+            throw new Error(`Empty position buffer for ${acronym}`);
+          }
+          applyCcfToThree(positions, acronym);
+          geometry.computeVertexNormals();
+          geometry.computeBoundingSphere();
+          targetMesh.geometry = geometry;
+          targetMesh.position.set(0, 0, 0); // PLY files are stored in absolute CCF coordinates
+          targetMesh.visible = true;
+          targetMesh.frustumCulled = false;
+          if (targetMesh.material) targetMesh.material.needsUpdate = true;
+          onLoaded();
+          console.log(`Allen mesh applied: ${acronym} (${meshSource})`);
+        }
+
+        function loadStaticMesh(structureId, acronym, targetMesh) {
+          const THREE = window.THREE;
+          if (!THREE?.PLYLoader) {
+            console.warn(`PLYLoader unavailable for ${acronym}. Using ellipsoid fallback.`);
+            onFailed(targetMesh);
+            return;
+          }
+          const loader = new THREE.PLYLoader();
+          loader.load(
+            `meshes/${structureId}.ply`,
+            (geometry) => {
+              try {
+                finishLoadedMesh(targetMesh, geometry, acronym);
+              } catch (err) {
+                console.warn(`Static PLY load failed for ${acronym}: ${err.message}. Using ellipsoid fallback.`);
+                onFailed(targetMesh);
+              }
+            },
+            undefined,
+            () => {
+              console.warn(`Static PLY unavailable for ${acronym} (id=${structureId}). Using ellipsoid fallback.`);
+              onFailed(targetMesh);
+            }
+          );
+        }
+
+        function fetchAndApplyMesh(structureId, acronym, targetMesh) {
+          if (meshSource !== 'backend') {
+            loadStaticMesh(structureId, acronym, targetMesh);
+            return;
+          }
+          const THREE = window.THREE;
+          if (!THREE) return;
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 15000);
+          fetch(`mesh/${structureId}`, { signal: controller.signal })
+            .then(r => {
+              clearTimeout(timeoutId);
+              if (!r.ok) throw new Error(`HTTP ${r.status} for ${acronym} (id=${structureId})`);
+              return r.json();
+            })
+            .then(data => {
+              if (!Array.isArray(data.vertices) || data.vertices.length === 0)
+                throw new Error(`Empty vertices array for ${acronym}`);
+              if (!Array.isArray(data.faces) || data.faces.length === 0)
+                throw new Error(`Empty faces array for ${acronym}`);
+              if (data.vertices.length % 3 !== 0)
+                throw new Error(`Malformed vertices for ${acronym}`);
+              if (data.faces.length % 3 !== 0)
+                throw new Error(`Malformed faces for ${acronym}`);
+              const verts = new Float32Array(data.vertices);
+              applyCcfToThree(verts, acronym);
+              const THREE2 = window.THREE;
+              const geo = new THREE2.BufferGeometry();
+              geo.setAttribute('position', new THREE2.BufferAttribute(verts, 3));
+              if (data.faces.length > 0) {
+                const indices = new Uint32Array(data.faces);
+                geo.setIndex(new THREE2.BufferAttribute(indices, 1));
+              }
+              finishLoadedMesh(targetMesh, geo, acronym);
+            })
+            .catch(err => {
+              clearTimeout(timeoutId);
+              console.warn(`Allen mesh unavailable for ${acronym} (id=${structureId}): ${err.message}. Using ellipsoid fallback.`);
+              onFailed(targetMesh);
+            });
+        }
+
+        structures.forEach(s => {
+          const targetMesh = meshMapRef.current[s.acronym];
+          if (!targetMesh) { console.warn(`Mesh loading: "${s.acronym}" not in meshMapRef. Skipping.`); onFailed(null); return; }
+          fetchAndApplyMesh(s.id, s.acronym, targetMesh);
+        });
+        fetchAndApplyMesh(ROOT_MESH_ID, 'root', shellRef.current);
+
+      }, [sceneReady, atlasVersion, backendStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+      // ---------------------------------------------------------------------------
+      // Axis indicator
+      // ---------------------------------------------------------------------------
+      function drawAxisIndicator() {
+        const canvas = axisCanvasRef.current;
+        if (!canvas) return;
+        const ctx    = canvas.getContext('2d');
+        const SIZE   = 80;
+        const CENTER = 40;
+        const LENGTH = 28;
+
+        ctx.clearRect(0, 0, SIZE, SIZE);
+        ctx.beginPath();
+        ctx.arc(CENTER, CENTER, 36, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(245, 242, 236, 0.85)';
+        ctx.fill();
+        ctx.strokeStyle = '#DDD8CE';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        const { theta, phi } = orbitRef.current;
+        const sinPhi = Math.sin(phi), cosPhi = Math.cos(phi);
+        const sinTheta = Math.sin(theta), cosTheta = Math.cos(theta);
+
+        const rightX =  sinPhi * cosTheta, rightY = 0, rightZ = -sinPhi * sinTheta;
+        const rightLen = Math.sqrt(rightX*rightX + rightY*rightY + rightZ*rightZ) || 1;
+        const upX = -(cosPhi * sinTheta), upY = sinPhi, upZ = -(cosPhi * cosTheta);
+        const upLen = Math.sqrt(upX*upX + upY*upY + upZ*upZ) || 1;
+
+        function projectAxis(ax, ay, az) {
+          return {
+            sx: (ax * rightX + ay * rightY + az * rightZ) / rightLen,
+            sy: -((ax * upX + ay * upY + az * upZ) / upLen),
+          };
+        }
+
+        const axes = [
+          { vec: [1,0,0], color: '#E74C3C', label: 'R' },
+          { vec: [0,1,0], color: '#2ECC71', label: 'D' },
+          { vec: [0,0,1], color: '#3498DB', label: 'A' },
+        ];
+
+        const projected = axes.map(a => {
+          const { sx, sy } = projectAxis(...a.vec);
+          const viewX = sinPhi * sinTheta, viewY = cosPhi, viewZ = sinPhi * cosTheta;
+          const depth = a.vec[0]*viewX + a.vec[1]*viewY + a.vec[2]*viewZ;
+          return { ...a, sx, sy, depth };
+        });
+        projected.sort((a, b) => a.depth - b.depth);
+
+        projected.forEach(({ sx, sy, color, label }) => {
+          const ex = CENTER + sx * LENGTH;
+          const ey = CENTER + sy * LENGTH;
+          ctx.beginPath(); ctx.moveTo(CENTER, CENTER); ctx.lineTo(ex, ey);
+          ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.stroke();
+          const angle = Math.atan2(sy, sx);
+          ctx.beginPath();
+          ctx.moveTo(ex, ey);
+          ctx.lineTo(ex - 6*Math.cos(angle-0.4), ey - 6*Math.sin(angle-0.4));
+          ctx.lineTo(ex - 6*Math.cos(angle+0.4), ey - 6*Math.sin(angle+0.4));
+          ctx.closePath();
+          ctx.fillStyle = color; ctx.fill();
+          ctx.font = 'bold 9px "DM Mono", monospace';
+          ctx.fillStyle = color;
+          ctx.fillText(label, ex + 5*Math.cos(angle), ey + 5*Math.sin(angle) + 4);
+        });
+      }
+
+      useEffect(() => {
+        drawAxisIndicator();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [cameraState]);
+
+      // ---------------------------------------------------------------------------
+      // handleToggleLock
+      // ---------------------------------------------------------------------------
+      const handleToggleLock = useCallback(() => {
+        const next = !viewLockedRef.current;
+        viewLockedRef.current = next;
+        setViewLocked(next);
+        if (next) {
+          isLerping.current = true;
+        } else {
+          isLerping.current = false;
+          if (cameraRef.current) {
+            const pos = cameraRef.current.position;
+            const r = pos.length();
+            orbitRef.current.radius = r;
+            orbitRef.current.phi    = Math.acos(pos.y / r);
+            orbitRef.current.theta  = Math.atan2(pos.x, pos.z);
+          }
+        }
+      }, []);
+
+      // ---------------------------------------------------------------------------
+      // Slider change handler
+      // ---------------------------------------------------------------------------
+      const handleSliderChange = useCallback((field, rawValue) => {
+        const RANGES = {
+          pitch: [-45, 45], yaw: [-45, 45], roll: [-45, 45],
+          apPosition: [-3000, 3000], lrPosition: [-3000, 3000], dvPosition: [-2000, 2000],
+        };
+        let value = Number(rawValue);
+        if (field in RANGES) {
+          const [lo, hi] = RANGES[field];
+          value = Math.max(lo, Math.min(hi, value));
+        }
+        setSliceState(prev => ({ ...prev, [field]: value }));
+      }, []);
+
+      // ---------------------------------------------------------------------------
+      // Thickness selector
+      // ---------------------------------------------------------------------------
+      const THICKNESS_OPTIONS = [350, 400, 1000, 2000, 4000, 6000];
+      const THICKNESS_LABELS  = ['350µm','400µm','1mm','2mm','4mm','6mm'];
+
+      const handleThickness = useCallback((val, label) => {
+        setSelectedThickness(label);
+        setSliceState(prev => ({ ...prev, thickness: val }));
+      }, []);
+
+      // ---------------------------------------------------------------------------
+      // applyPresetHighlight
+      // ---------------------------------------------------------------------------
+      const applyPresetHighlight = useCallback((presetName) => {
+        if (!presetName || !PRESETS[presetName]) {
+          setHighlightState({ preset: null, highlighted: [] });
+          return;
+        }
+        const p = PRESETS[presetName];
+        setHighlightState({ preset: presetName, highlighted: p.highlighted });
+      }, []);
+
+      // ---------------------------------------------------------------------------
+      // Preset button handlers
+      // ---------------------------------------------------------------------------
+      const handlePreset = useCallback((name) => {
+        if (name === 'reset') {
+          setSliceState(prev => ({ ...prev, pitch: 0, yaw: 0, roll: 0, apPosition: 0, lrPosition: 0, dvPosition: 0 }));
+          setHighlightState({ preset: null, highlighted: [] });
+          return;
+        }
+        applyPreset(name, sliceState.thickness, setSliceState, setHighlightState);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [sliceState.thickness]);
+
+      // ---------------------------------------------------------------------------
+      // Region toggle handlers
+      // ---------------------------------------------------------------------------
+      const handleToggleStructure = useCallback((acronym, checked) => {
+        console.log(`Toggle structure: ${acronym} -> ${checked}`);
+        if (!CCF_BY_ACRONYM[acronym]) { console.warn(`RegionTogglePanel: unknown acronym "${acronym}"`); return; }
+        
+        const mesh = meshMapRef.current[acronym];
+        if (mesh) mesh.visible = checked;
+        
+        // Sync ref immediately for animate loop
+        visibilityRef.current = { ...visibilityRef.current, [acronym]: checked };
+        
+        setVisibilityState(prev => ({ ...prev, [acronym]: checked }));
+      }, []);
+
+      const handleToggleGroup = useCallback((groupName, checked) => {
+        console.log(`Toggle group: ${groupName} -> ${checked}`);
+        toggleGroup(groupName, checked, meshMapRef, setVisibilityState);
+        
+        // Sync ref immediately for animate loop
+        const members = CCF_BY_GROUP[groupName];
+        const nextVis = { ...visibilityRef.current };
+        members.forEach(a => { nextVis[a] = checked; });
+        visibilityRef.current = nextVis;
+
+        setGroupVisibility(prev => ({ ...prev, [groupName]: checked }));
+      }, []);
+
+      const toggleGroupExpand = useCallback((groupName) => {
+        setExpandedGroups(prev => ({ ...prev, [groupName]: !prev[groupName] }));
+      }, []);
+
+      function isGroupChecked(groupName) {
+        return (CCF_BY_GROUP[groupName] || []).every(a => visibilityState[a] !== false);
+      }
+
+      // ---------------------------------------------------------------------------
+      // Generate Slice handler
+      // ---------------------------------------------------------------------------
+      const handleGenerateSlice = useCallback(() => {
+        if (!rendererRef.current || !sceneRef.current || !cameraRef.current) return;
+        sceneRef.current.updateMatrixWorld(true);
+
+        const plane = buildSlicePlane(
+          sliceState.pitch,
+          sliceState.yaw,
+          sliceState.roll,
+          sliceState.apPosition,
+          sliceState.lrPosition,
+          sliceState.dvPosition
+        );
+
+        const intersections = computeAllIntersections(structureMeshesRef.current, plane);
+
+        setSliceResult({
+          plane,
+          intersections,
+          thickness:  selectedThickness,
+          pitch:      sliceState.pitch,
+          yaw:        sliceState.yaw,
+          roll:       sliceState.roll,
+          apPosition: sliceState.apPosition,
+          lrPosition: sliceState.lrPosition,
+          dvPosition: sliceState.dvPosition,
+        });
+
+        // Reset 2D interaction on new slice
+        setSlice2DOrbit({ panX: 0, panY: 0, zoom: 1 });
+        setSlice2DHover(null);
+      }, [sliceState, selectedThickness]);
+
+      // ---------------------------------------------------------------------------
+      // Export handlers
+      // ---------------------------------------------------------------------------
+      const handleExportPNG = useCallback(() => {
+        if (!sliceCanvasRef.current) return;
+        const url = sliceCanvasRef.current.toDataURL('image/png');
+        const a = document.createElement('a');
+        const r = sliceResult;
+        a.download = `slice_pitch${r.pitch}_yaw${r.yaw}_roll${r.roll}_${r.thickness.replace(/\s/g,'')}.png`;
+        a.href = url; a.click(); URL.revokeObjectURL(url);
+      }, [sliceResult]);
+
+      const handleExportConfig = useCallback(() => {
+        if (!sliceResult) return;
+        const thicknessMap = {
+          '350µm':350, '400µm':400, '1mm':1000, '2mm':2000, '4mm':4000, '6mm':6000,
+        };
+        const config = {
+          tool: 'Allen Atlas Oblique Slice Planner',
+          version: '2.1',
+          mesh_source: backendStatus === 'ok'
+            ? 'Allen CCF v3 PLY via local mesh server'
+            : 'Allen CCF v3 PLY via static meshes directory, with ellipsoid fallback when files are missing',
+          ccf_version: atlasVersion === 'p4' ? 'p4' : 'v3',
+          slice_config: {
+            top_angle_deg:  sliceResult.yaw,
+            side_angle_deg: sliceResult.roll,
+            dist_rostral_um: Math.round(sliceResult.apPosition + (atlasVersion === 'p4' ? 3700 : 6500)),
+            dist_caudal_um:  Math.round((atlasVersion === 'p4' ? 3700 : 6500) - sliceResult.apPosition),
+            thickness_um:   thicknessMap[sliceResult.thickness] ?? 400,
+          },
+          active_preset: highlightState.preset === 'tc'    ? 'thalamocortical'
+                       : highlightState.preset === 'hippo' ? 'hippocampal'
+                       : null,
+          intersected_structures: sliceResult.intersections.map(ix => ({
+            acronym: ix.acronym, name: ix.name, group: ix.group,
+          })),
+        };
+        const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.download = `slice_config_${Date.now()}.json`;
+        a.href = url; a.click(); URL.revokeObjectURL(url);
+      }, [sliceResult, sliceState, highlightState, backendStatus]);
+
+      // ---------------------------------------------------------------------------
+      // Hover tooltip
+      // ---------------------------------------------------------------------------
+      const handleMouseMove = useCallback((e) => {
+        if (orbitRef.current?.isPointerDown) { setTooltip(null); return; }
+        const now = Date.now();
+        if (now - lastRaycastTime.current < 50) return;
+        lastRaycastTime.current = now;
+        const THREE = window.THREE;
+        if (!THREE || !rendererRef.current || !cameraRef.current) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        const x = ( (e.clientX - rect.left)  / rect.width  ) * 2 - 1;
+        const y = -((e.clientY - rect.top)   / rect.height ) * 2 + 1;
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(new THREE.Vector2(x, y), cameraRef.current);
+        const hits = raycaster.intersectObjects(structureMeshesRef.current);
+        if (hits.length > 0) {
+          const ud = hits[0].object.userData;
+          setTooltip({ x: e.clientX - rect.left + 12, y: e.clientY - rect.top - 20, name: ud.name, group: ud.group });
+        } else {
+          setTooltip(null);
+        }
+      }, []);
+
+      // ---------------------------------------------------------------------------
+      // SavedSlices handlers
+      // ---------------------------------------------------------------------------
+      const handleSaveSlice = useCallback(() => {
+        if (!sliceResult) return;
+        setShowSaveInput(true);
+        setSaveNameInput('');
+      }, [sliceResult]);
+
+      const confirmSaveSlice = useCallback(() => {
+        if (!sliceResult) return;
+        const name = saveNameInput.trim() || `Slice ${savedSlices.length + 1}`;
+        const sliceResultCopy = {
+          ...sliceResult,
+          intersections: sliceResult.intersections.map(ix => ({
+            ...ix,
+            centroid: ix.centroid.clone(),
+            segments: ix.segments.map(s => ({ start: s.start.clone(), end: s.end.clone() })),
+          })),
+        };
+        const thumbnail = renderMiniSlice({ sliceResult: sliceResultCopy });
+        const entry = {
+          id:         Date.now().toString(),
+          name,
+          pitch:      sliceResult.pitch      ?? sliceState.pitch,
+          yaw:        sliceResult.yaw        ?? sliceState.yaw,
+          roll:       sliceResult.roll       ?? sliceState.roll,
+          apPosition: sliceResult.apPosition ?? sliceState.apPosition,
+          lrPosition: sliceState.lrPosition,
+          dvPosition: sliceState.dvPosition,
+          thickness:  sliceResult.thickness,
+          preset:     highlightState.preset,
+          sliceResult: sliceResultCopy,
+          thumbnail,
+          savedAt: new Date().toISOString(),
+        };
+        setSavedSlices(prev => [...prev, entry]);
+        setShowSaveInput(false);
+        setSaveNameInput('');
+      }, [sliceResult, sliceState, highlightState, savedSlices.length, saveNameInput]);
+
+      const handleRecallSlice = useCallback((entry) => {
+        setSliceState(s => ({
+          ...s,
+          pitch:      entry.pitch,
+          yaw:        entry.yaw,
+          roll:       entry.roll,
+          apPosition: entry.apPosition,
+          lrPosition: entry.lrPosition ?? 0,
+          dvPosition: entry.dvPosition ?? 0,
+        }));
+        setSelectedThickness(entry.thickness);
+        if (entry.preset) {
+          applyPresetHighlight(entry.preset);
+        } else {
+          setHighlightState({ preset: null, highlighted: [] });
+        }
+        setSliceResult(entry.sliceResult);
+        rightPanelRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+      }, [applyPresetHighlight]);
+
+      const handleDeleteSlice = useCallback((id) => {
+        setSavedSlices(prev => prev.filter(e => e.id !== id));
+      }, []);
+
+      const handleExportSession = useCallback(() => {
+        const data = {
+          tool:       'Allen Atlas Oblique Slice Planner',
+          version:    '1.0',
+          exportedAt: new Date().toISOString(),
+          slices: savedSlices.map(e => ({
+            ...e,
+            sliceResult: {
+              ...e.sliceResult,
+              plane: {
+                normal:   { x: e.sliceResult.plane.normal.x, y: e.sliceResult.plane.normal.y, z: e.sliceResult.plane.normal.z },
+                constant: e.sliceResult.plane.constant,
+              },
+            },
+          })),
+        };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.download = `atlas_session_${Date.now()}.json`;
+        a.href = url; a.click(); URL.revokeObjectURL(url);
+      }, [savedSlices]);
+
+      const handleImportSession = useCallback((e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const data = JSON.parse(ev.target.result);
+            if (!Array.isArray(data.slices)) throw new Error('Missing slices array');
+            const THREE = window.THREE;
+            const restored = data.slices.map(entry => {
+              if (entry.sliceResult?.plane && !entry.sliceResult.plane.distanceToPoint) {
+                const { normal: n, constant: c } = entry.sliceResult.plane;
+                entry.sliceResult.plane = new THREE.Plane(new THREE.Vector3(n.x, n.y, n.z), c);
+              }
+              if (entry.sliceResult?.intersections) {
+                entry.sliceResult.intersections.forEach(ix => {
+                  if (ix.segments) {
+                    ix.segments = ix.segments.map(seg => ({
+                      start: seg.start?.x !== undefined ? new THREE.Vector3(seg.start.x, seg.start.y, seg.start.z) : seg.start,
+                      end:   seg.end?.x   !== undefined ? new THREE.Vector3(seg.end.x,   seg.end.y,   seg.end.z)   : seg.end,
+                    }));
+                  }
+                  if (ix.centroid?.x !== undefined) {
+                    ix.centroid = new THREE.Vector3(ix.centroid.x, ix.centroid.y, ix.centroid.z);
+                  }
+                  if (!ix.color) ix.color = '#888888';
+                });
+              }
+              return entry;
+            });
+            setSavedSlices(prev => [...prev, ...restored]);
+            setImportMsg(`Imported ${restored.length} slice${restored.length !== 1 ? 's' : ''}`);
+            setTimeout(() => setImportMsg(''), 2500);
+          } catch (err) {
+            setImportMsg(`Import failed: ${err.message}`);
+            setTimeout(() => setImportMsg(''), 3000);
+          }
+          e.target.value = '';
+        };
+        reader.readAsText(file);
+      }, []);
+
+      // 2D Slice Interaction Handlers
+      const handle2DPointerDown = useCallback((e) => {
+        slice2DRef.current.isDown = true;
+        slice2DRef.current.lastX = e.clientX;
+        slice2DRef.current.lastY = e.clientY;
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }, []);
+
+      const handle2DPointerMove = useCallback((e) => {
+        if (!slice2DRef.current.isDown) return;
+        const dx = e.clientX - slice2DRef.current.lastX;
+        const dy = e.clientY - slice2DRef.current.lastY;
+        slice2DRef.current.lastX = e.clientX;
+        slice2DRef.current.lastY = e.clientY;
+        setSlice2DOrbit(prev => ({ ...prev, panX: prev.panX + dx, panY: prev.panY + dy }));
+      }, []);
+
+      const handle2DPointerUp = useCallback((e) => {
+        slice2DRef.current.isDown = false;
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }, []);
+
+      const handle2DWheel = useCallback((e) => {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        setSlice2DOrbit(prev => ({ ...prev, zoom: Math.max(0.1, Math.min(10, prev.zoom * delta)) }));
+      }, []);
+
+      // ---------------------------------------------------------------------------
+      // renderSlice2D — updated for interactivity
+      // ---------------------------------------------------------------------------
+      const renderSlice2D = useCallback(() => {
+        const THREE = window.THREE;
+        if (!THREE) return;
+        const canvas = sliceCanvasRef.current;
+        if (!canvas || !sliceResult) return;
+
+        const W = canvas.offsetWidth || 400;
+        const H = 300;
+        canvas.width  = W;
+        canvas.height = H;
+
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#FAF8F5';
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.strokeStyle = '#E8E4DC';
+        ctx.lineWidth   = 0.5;
+        for (let x = 0; x < W; x += 50) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+        for (let y = 0; y < H; y += 50) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+
+        if (!sliceResult.intersections || sliceResult.intersections.length === 0) {
+          ctx.font = '11px "DM Mono", monospace';
+          ctx.fillStyle = '#8A8078';
+          ctx.textAlign = 'center';
+          ctx.fillText('No structures intersected', W / 2, H / 2);
+          ctx.textAlign = 'left';
+          return;
+        }
+
+        const normal = sliceResult.plane.normal;
+        const up = Math.abs(normal.y) < 0.99 ? new THREE.Vector3(0,1,0) : new THREE.Vector3(1,0,0);
+        const uAxis = new THREE.Vector3().crossVectors(up, normal).normalize();
+        const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
+
+        let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+        sliceResult.intersections.forEach(intersection => {
+          intersection.segments.forEach(seg => {
+            ['start','end'].forEach(key => {
+              const u =  seg[key].dot(uAxis);
+              const v = -seg[key].dot(vAxis);
+              if (u < uMin) uMin = u; if (u > uMax) uMax = u;
+              if (v < vMin) vMin = v; if (v > vMax) vMax = v;
+            });
+          });
+        });
+
+        const rangeU = uMax - uMin || 1;
+        const rangeV = vMax - vMin || 1;
+        const baseScale = Math.min((W * 0.8) / rangeU, (H * 0.8) / rangeV);
+        
+        const SCALE = baseScale * slice2DOrbit.zoom;
+        const uCenter = (uMin + uMax) / 2;
+        const vCenter = (vMin + vMax) / 2;
+        const cx = W / 2 - uCenter * SCALE + slice2DOrbit.panX;
+        const cy = H / 2 - vCenter * SCALE + slice2DOrbit.panY;
+
+        // Store projection info for click identification
+        canvas.userData = { 
+          baseScale, uCenter, vCenter, uAxis, vAxis, W, H,
+          SCALE, cx, cy // for backward compatibility/debugging
+        };
+
+        // Region fills
+        sliceResult.intersections.forEach(intersection => {
+          if (intersection.segments.length === 0) return;
+          const pts = [];
+          intersection.segments.forEach(seg => {
+            ['start','end'].forEach(key => {
+              pts.push({ 
+                u: seg[key].dot(uAxis) * SCALE + cx, 
+                v: H / 2 + ((-seg[key].dot(vAxis)) - vCenter) * SCALE + slice2DOrbit.panY
+              });
+            });
+          });
+          const centU = intersection.centroid.dot(uAxis)*SCALE+cx;
+          const centV = H / 2 + ((-intersection.centroid.dot(vAxis)) - vCenter) * SCALE + slice2DOrbit.panY;
+          pts.sort((a,b) => Math.atan2(a.v-centV, a.u-centU) - Math.atan2(b.v-centV, b.u-centU));
+          ctx.beginPath();
+          ctx.moveTo(pts[0].u, pts[0].v);
+          pts.slice(1).forEach(p => ctx.lineTo(p.u, p.v));
+          ctx.closePath();
+          ctx.fillStyle = hexToRgba(intersection.color, 0.15);
+          ctx.fill();
+        });
+
+        // Stroke segments
+        sliceResult.intersections.forEach(intersection => {
+          ctx.strokeStyle = intersection.color;
+          ctx.lineWidth = 2;
+          ctx.lineCap = 'round';
+          intersection.segments.forEach(seg => {
+            ctx.beginPath();
+            ctx.moveTo(seg.start.dot(uAxis) * SCALE + cx, H / 2 + ((-seg.start.dot(vAxis)) - vCenter) * SCALE + slice2DOrbit.panY);
+            ctx.lineTo(seg.end.dot(uAxis)   * SCALE + cx, H / 2 + ((-seg.end.dot(vAxis))   - vCenter) * SCALE + slice2DOrbit.panY);
+            ctx.stroke();
+          });
+        });
+
+        // Labels
+        ctx.font = 'bold 11px "DM Mono", monospace';
+        const lb = sliceResult.intersections.map(ix => ({
+          x: ix.centroid.dot(uAxis)*SCALE+cx,
+          y: H / 2 + ((-ix.centroid.dot(vAxis)) - vCenter) * SCALE + slice2DOrbit.panY,
+          origX: ix.centroid.dot(uAxis)*SCALE+cx,
+          origY: H / 2 + ((-ix.centroid.dot(vAxis)) - vCenter) * SCALE + slice2DOrbit.panY,
+          text: ix.acronym, color: ix.color,
+        }));
+
+        const LABEL_MIN_DIST = 22;
+        for (let iter = 0; iter < 3; iter++) {
+          for (let i = 0; i < lb.length; i++) {
+            for (let j = i + 1; j < lb.length; j++) {
+              const dx = lb[j].x - lb[i].x, dy = lb[j].y - lb[i].y;
+              const dist = Math.sqrt(dx*dx + dy*dy);
+              if (dist < LABEL_MIN_DIST && dist > 0) {
+                const push = (LABEL_MIN_DIST - dist) / 2;
+                lb[i].x -= (dx/dist)*push; lb[i].y -= (dy/dist)*push;
+                lb[j].x += (dx/dist)*push; lb[j].y += (dy/dist)*push;
+              }
+            }
+          }
+        }
+
+        lb.forEach(label => {
+          const m = ctx.measureText(label.text);
+          ctx.fillStyle = 'rgba(250,248,245,0.92)';
+          ctx.beginPath();
+          if (ctx.roundRect) ctx.roundRect(label.x-3, label.y-11, m.width+6, 15, 3);
+          else ctx.rect(label.x-3, label.y-11, m.width+6, 15);
+          ctx.fill();
+          ctx.fillStyle = label.color;
+          ctx.fillText(label.text, label.x, label.y);
+        });
+
+        // Scale bar
+        const barPx = 1000 * SCALE;
+        const barX = 12, barY = H - 14;
+        ctx.save();
+        ctx.strokeStyle = '#8A8078'; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(barX, barY); ctx.lineTo(barX+barPx, barY);
+        ctx.stroke();
+        ctx.font = '9px "DM Mono", monospace'; ctx.fillStyle = '#8A8078';
+        ctx.fillText('1 mm', barX+barPx/2-12, barY-4);
+        ctx.restore();
+      }, [sliceResult, slice2DOrbit]);
+
+      const handle2DClick = useCallback((e) => {
+        if (!sliceResult || !sliceCanvasRef.current) return;
+        const canvas = sliceCanvasRef.current;
+        const rect = canvas.getBoundingClientRect();
+        const ex = e.clientX - rect.left;
+        const ey = e.clientY - rect.top;
+        const ud = canvas.userData;
+        if (!ud || !ud.baseScale) return;
+
+        const { panX, panY, zoom } = slice2DOrbit;
+        const SCALE = ud.baseScale * zoom;
+        const cx = ud.W / 2 - ud.uCenter * SCALE + panX;
+
+        // Reverse projection to find which structure was clicked
+        // Identifies structure with centroid closest to click in current screen space
+        let closest = null, minDist = 25; // 25px radius
+        sliceResult.intersections.forEach(ix => {
+          const u = ix.centroid.dot(ud.uAxis);
+          const v = -ix.centroid.dot(ud.vAxis);
+          const sx = u * SCALE + cx;
+          const sy = ud.H / 2 + (v - ud.vCenter) * SCALE + panY;
+          const dist = Math.sqrt((sx - ex)**2 + (sy - ey)**2);
+          if (dist < minDist) {
+            minDist = dist;
+            closest = ix;
+          }
+        });
+
+        if (closest) {
+          setSlice2DHover({ acronym: closest.acronym, name: closest.name, group: closest.group });
+          // Highlight it in the 3D view too
+          setHighlightState(prev => ({ ...prev, highlighted: [closest.acronym] }));
+        } else {
+          setSlice2DHover(null);
+        }
+      }, [sliceResult, slice2DOrbit]);
+
+      useEffect(() => {
+        if (sliceResult) renderSlice2D();
+      }, [sliceResult, renderSlice2D]);
+
+      // ---------------------------------------------------------------------------
+      // Render
+      // ---------------------------------------------------------------------------
+      return (
+        <>
+          {/* Root container — full viewport */}
+          <div style={{
+            display: 'flex', width: '100vw', height: '100vh',
+            overflow: 'hidden', background: T.bg, fontFamily: T.fontMono,
+          }}>
+
+            {/* ================================================================
+                LEFT PANEL — CSS grid "specimen frame" layout
+            ================================================================ */}
+            <div style={{
+              flex: `0 0 ${leftWidth}%`,
+              display: 'grid',
+              gridTemplateAreas: '". top ." "left canvas right" ". bottom ."',
+              gridTemplateColumns: '56px 1fr 56px',
+              gridTemplateRows: '56px 1fr 56px',
+              background: '#FAF8F5',
+              position: 'relative',
+            }}>
+
+              {/* ---- Top slider: ROSTRAL ← → CAUDAL (Anterior-Posterior) ---- */}
+              <div style={{
+                gridArea: 'top', display: 'flex', flexDirection: 'column',
+                alignItems: 'center', justifyContent: 'center', padding: '4px 0',
+              }}>
+                <div style={{
+                  fontFamily: '"DM Mono",monospace', fontSize: 9, color: '#8A8078',
+                  marginBottom: 2, userSelect: 'none',
+                }}>ROSTRAL ← → CAUDAL</div>
+                <div style={{ position: 'relative', width: '100%' }}>
+                  <input
+                    type="range" className="frame-slider"
+                    min={atlasVersion === 'p4' ? -3700 : -6500} 
+                    max={atlasVersion === 'p4' ? 3700 : 6500} 
+                    step={50}
+                    value={sliceState.apPosition}
+                    onChange={e => setSliceState(s => ({ ...s, apPosition: Number(e.target.value) }))}
+                    style={{ width: '100%', display: 'block' }}
+                  />
+                  {/* Rostral / Caudal distance readouts */}
+                  <div style={{
+                    position: 'absolute', right: 0, top: -18,
+                    fontFamily: '"DM Mono", monospace', fontSize: 10,
+                    background: '#FAF8F5', border: '1px solid #DDD8CE',
+                    borderRadius: 10, padding: '1px 7px', color: '#5A5450',
+                    pointerEvents: 'none', whiteSpace: 'nowrap',
+                  }}>
+                    {(() => {
+                      const scale = atlasVersion === 'p4' ? 0.57 : 1.0;
+                      const centerOffset = 6500 * scale;
+                      const distR = (sliceState.apPosition + centerOffset) / 1000;
+                      const distC = (centerOffset - sliceState.apPosition) / 1000;
+                      return `R:${distR.toFixed(1)}mm | C:${distC.toFixed(1)}mm`;
+                    })()}
+                  </div>
+                </div>
+              </div>
+
+              {/* ---- Left slider: SIDE ANGLE (Tilt — Euler X) ---- */}
+              <div className="vslider-wrap" style={{ gridArea: 'left' }}>
+                <span style={{
+                  position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)',
+                  fontFamily: '"DM Mono",monospace', fontSize: 8, color: '#8A8078',
+                  writingMode: 'vertical-rl', userSelect: 'none', letterSpacing: '0.05em',
+                }}>
+                  SIDE ANGLE
+                </span>
+                <input
+                  ref={rollSliderRef}
+                  type="range" className="frame-slider"
+                  min={-45} max={45} step={1}
+                  value={sliceState.roll}
+                  onChange={e => setSliceState(s => ({ ...s, roll: Number(e.target.value) }))}
+                  style={{
+                    transform: 'rotate(-90deg)', transformOrigin: 'center center',
+                    width: '200px', display: 'block',
+                  }}
+                />
+                <SliderPill value={sliceState.roll} unit="°" />
+              </div>
+
+              {/* ---- Canvas cell: Three.js 3D viewer ---- */}
+              <div
+                ref={mountRef}
+                style={{
+                  gridArea: 'canvas', position: 'relative',
+                  overflow: 'hidden', cursor: 'grab',
+                }}
+                onMouseMove={handleMouseMove}
+                onMouseLeave={() => setTooltip(null)}
+              >
+                {/* Stage 7: WebGL Error fallback message */}
+                {webglError && (
+                  <div style={{
+                    position:'absolute', top:0, left:0, width:'100%', height:'100%',
+                    display:'flex', alignItems:'center', justifyContent:'center',
+                    background:'#FAF8F5', color:T.text, padding:40, textAlign:'center',
+                    fontFamily:T.fontMono, zIndex:100,
+                  }}>
+                    <div>
+                      <h3 style={{ margin:'0 0 10px 0', color:'#E74C3C' }}>WebGL Unavailable</h3>
+                      <p style={{ margin:0, fontSize:12, lineHeight:1.5 }}>
+                        Failed to initialize Three.js.<br/>
+                        Check your browser settings for "Hardware Acceleration" or try another device.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Canvas overlay for 3D projected acronym labels */}
+                <canvas
+                  ref={labelOverlayRef}
+                  style={{
+                    position: 'absolute', top: 0, left: 0,
+                    width: '100%', height: '100%', pointerEvents: 'none',
+                  }}
+                />
+
+                {/* View lock toggle button */}
+                <button
+                  onClick={handleToggleLock}
+                  style={{
+                    position: 'absolute', top: 12, right: 12, zIndex: 10,
+                    fontFamily: '"DM Mono", monospace', fontSize: 10,
+                    background: viewLocked ? '#4A6741' : '#FAF8F5',
+                    color:      viewLocked ? 'white'   : '#3D3530',
+                    border: '1px solid #DDD8CE', borderRadius: 4,
+                    padding: '6px 10px', cursor: 'pointer',
+                  }}
+                >
+                  {viewLocked ? '\u229E Locked View' : '\u2295 Free Orbit'}
+                </button>
+
+                {/* Stage 7: Backend connection status indicator */}
+                {backendStatus !== 'checking' && (
+                  <div style={{
+                    position:'absolute', top:46, right:12, zIndex:20,
+                    fontFamily:'"DM Mono",monospace', fontSize:10,
+                    background:'rgba(250,248,245,0.92)', border:'1px solid #DDD8CE',
+                    borderRadius:4, padding:'3px 8px', pointerEvents:'none',
+                    display:'flex', alignItems:'center', gap:5,
+                  }}>
+                    <span style={{ color: backendStatus==='ok' ? '#27AE60' : '#F39C12', fontSize:8 }}>●</span>
+                    <span style={{ color:'#5A5450' }}>
+                      {backendStatus==='ok'
+                        ? 'Allen mesh server connected'
+                        : (meshLoadState.loaded > 0
+                            ? 'Static PLY mesh mode'
+                            : (meshLoadState.failed > 0 && meshLoadState.loaded + meshLoadState.failed === meshLoadState.total
+                                ? 'Static mode \u2014 ellipsoid fallback'
+                                : 'Static mode \u2014 loading repo meshes'))}
+                    </span>
+                  </div>
+                )}
+
+                {/* Hover tooltip */}
+                {tooltip && (
+                  <div style={{
+                    position: 'absolute', left: tooltip.x, top: tooltip.y,
+                    background: '#FAF8F5', border: `1px solid ${T.border}`,
+                    borderRadius: 4, padding: '4px 8px',
+                    fontFamily: T.fontMono, fontSize: 11, color: T.text,
+                    pointerEvents: 'none', zIndex: 100,
+                    whiteSpace: 'nowrap', boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                  }}>
+                    <strong>{tooltip.name}</strong>
+                    <span style={{ color: T.textMuted, marginLeft: 6 }}>{tooltip.group}</span>
+                  </div>
+                )}
+
+                {/* Region Toggle Panel */}
+                <div 
+                  style={{
+                    position: 'absolute', 
+                    top: structuresPanelDrag.pos.y, 
+                    left: structuresPanelDrag.pos.x,
+                    background: T.bg, border: `1px solid ${T.border}`,
+                    borderRadius: 8, padding: 0, maxWidth: 210,
+                    fontFamily: T.fontMono, fontSize: 11, color: T.text,
+                    zIndex: 10, boxShadow: '0 2px 8px rgba(0,0,0,0.08)', userSelect: 'none',
+                  }}
+                >
+                  {/* Drag handle — only part that initiates movement */}
+                  <div 
+                    onMouseDown={structuresPanelDrag.onMouseDown}
+                    style={{
+                      height: 14, width: '100%', background: '#F5F2EC',
+                      borderRadius: '8px 8px 0 0', cursor: 'grab',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      borderBottom: `1px solid ${T.border}`,
+                    }}>
+                    <div style={{ width: 24, height: 2, background: '#DDD8CE', borderRadius: 1 }} />
+                  </div>
+
+                  <div style={{ padding: 10 }}>
+                    <div style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      marginBottom: panelExpanded ? 8 : 0,
+                    }}>
+                      <span style={{ fontFamily: T.fontMono, fontWeight: 500, fontSize: 11, letterSpacing: '0.05em', color: T.text }}>
+                        Structures
+                      </span>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setPanelExpanded(v => !v); }}
+                        onMouseDown={e => e.stopPropagation()}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.textMuted, fontSize: 13, padding: '0 2px', lineHeight: 1 }}
+                        title={panelExpanded ? 'Collapse' : 'Expand'}
+                      >
+                        {panelExpanded ? '▲' : '▼'}
+                      </button>
+                    </div>
+
+                    {panelExpanded && Object.keys(CCF_BY_GROUP).map(groupName => {
+                      const groupChecked  = isGroupChecked(groupName);
+                      const groupExpanded = expandedGroups[groupName];
+                      const members       = CCF_BY_GROUP[groupName];
+                      return (
+                        <div key={groupName} style={{ marginBottom: 4 }} onMouseDown={e => e.stopPropagation()}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 5, paddingBottom: 2 }}>
+                            <input type="checkbox" checked={groupChecked}
+                                   onMouseDown={e => e.stopPropagation()}
+                                   onChange={e => { handleToggleGroup(groupName, e.target.checked); }}
+                                   style={{ cursor: 'pointer', accentColor: T.accent, margin: 0 }} />
+                            <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 3, background: GROUP_COLORS[groupName], flexShrink: 0 }} />
+                            <span 
+                              onClick={() => handleToggleGroup(groupName, !groupChecked)}
+                              onMouseDown={e => e.stopPropagation()}
+                              style={{ flex: 1, fontWeight: 500, textTransform: 'capitalize', fontSize: 11, cursor: 'pointer' }}
+                            >
+                              {groupName}
+                            </span>
+                            <button onClick={(e) => { toggleGroupExpand(groupName); }}
+                                    onMouseDown={e => e.stopPropagation()}
+                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.textMuted, fontSize: 11, padding: '0 2px' }}>
+                              {groupExpanded ? '▲' : '▼'}
+                            </button>
+                          </div>
+                          {groupExpanded && members.map(acronym => {
+                            const s = CCF_BY_ACRONYM[acronym];
+                            const checked = visibilityState[acronym] !== false;
+                            return (
+                              <div key={acronym} style={{ display: 'flex', alignItems: 'center', gap: 5, paddingLeft: 16, marginBottom: 2 }}>
+                                <input type="checkbox" checked={checked}
+                                       onMouseDown={e => e.stopPropagation()}
+                                       onChange={e => { handleToggleStructure(acronym, e.target.checked); }}
+                                       style={{ cursor: 'pointer', accentColor: T.accent, margin: 0 }} />
+                                <span 
+                                  onClick={() => handleToggleStructure(acronym, !checked)}
+                                  onMouseDown={e => e.stopPropagation()}
+                                  style={{ fontFamily: T.fontMono, fontWeight: 500, color: s.color, fontSize: 10, minWidth: 40, cursor: 'pointer' }}
+                                >
+                                  {acronym}
+                                </span>
+                                <span 
+                                  onClick={() => handleToggleStructure(acronym, !checked)}
+                                  onMouseDown={e => e.stopPropagation()}
+                                  style={{ color: T.textMuted, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 90, cursor: 'pointer' }} 
+                                  title={s.label}
+                                >
+                                  {s.label}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Loading progress overlay */}
+                {meshLoadState.loaded + meshLoadState.failed < meshLoadState.total && meshLoadState.total > 0 && (
+                  <div style={{
+                    position: 'absolute', bottom: 48, right: 12,
+                    background: 'rgba(250,248,245,0.92)', border: `1px solid ${T.border}`,
+                    borderRadius: 6, padding: '5px 10px',
+                    fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
+                    pointerEvents: 'none', zIndex: 10,
+                  }}>
+                    Loading meshes\u2026 ({meshLoadState.loaded}/{meshLoadState.total})
+                    {meshLoadState.failed > 0 && ` \u00b7 ${meshLoadState.failed} fallback`}
+                  </div>
+                )}
+
+                {/* Axis Indicator */}
+                <canvas
+                  ref={axisCanvasRef}
+                  width={80} height={80}
+                  style={{ position: 'absolute', bottom: 12, left: 12, pointerEvents: 'none', zIndex: 10 }}
+                />
+              </div>
+
+              {/* ---- Right slider: D ↕ V ---- */}
+              <div className="vslider-wrap" style={{ gridArea: 'right' }}>
+                <input
+                  ref={dvSliderRef}
+                  type="range" className="frame-slider"
+                  min={-2000} max={2000} step={50}
+                  value={sliceState.dvPosition}
+                  onChange={e => setSliceState(s => ({ ...s, dvPosition: Number(e.target.value) }))}
+                  style={{
+                    transform: 'rotate(-90deg)', transformOrigin: 'center center',
+                    width: '200px', display: 'block',
+                  }}
+                />
+                <span style={{
+                  position: 'absolute', bottom: 8, left: '50%', transform: 'translateX(-50%)',
+                  fontFamily: '"DM Mono",monospace', fontSize: 8, color: '#8A8078',
+                  writingMode: 'vertical-rl', userSelect: 'none', letterSpacing: '0.05em',
+                }}>
+                  D \u2195 V
+                </span>
+              </div>
+
+              {/* ---- Bottom slider: TOP ANGLE (Yaw — Euler Y) ---- */}
+              <div style={{
+                gridArea: 'bottom', display: 'flex', flexDirection: 'column',
+                alignItems: 'center', justifyContent: 'center', padding: '4px 0',
+              }}>
+                <div style={{ position: 'relative', width: '100%' }}>
+                  <input
+                    type="range" className="frame-slider"
+                    min={-45} max={45} step={1}
+                    value={sliceState.yaw}
+                    onChange={e => setSliceState(s => ({ ...s, yaw: Number(e.target.value) }))}
+                    style={{ width: '100%', display: 'block' }}
+                  />
+                  <SliderPill value={sliceState.yaw} unit="°" />
+                </div>
+                <div style={{
+                  fontFamily: '"DM Mono",monospace', fontSize: 9, color: '#8A8078',
+                  marginTop: 2, userSelect: 'none',
+                }}>TOP ANGLE</div>
+              </div>
+
+            </div>{/* end left panel grid */}
+
+            {/* ---- Vertical Resize Divider ---- */}
+            <div 
+              onMouseDown={onResizeMouseDown}
+              style={{
+                width: 4, cursor: 'col-resize', background: '#E8E4DC',
+                flexShrink: 0, position: 'relative', zIndex: 100,
+                transition: 'background 0.2s',
+              }}
+              onMouseEnter={e => e.target.style.background = T.accent}
+              onMouseLeave={e => e.target.style.background = '#E8E4DC'}
+            >
+              <div style={{
+                position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+                width: 2, height: 24, background: 'rgba(0,0,0,0.1)', borderRadius: 1
+              }} />
+            </div>
+
+            {/* ================================================================
+                RIGHT PANEL — Controls + Slice Output (40%)
+            ================================================================ */}
+            <div style={{
+              flex: `1 1 ${100 - leftWidth}%`, display: 'flex', flexDirection: 'column',
+              borderLeft: `1px solid ${T.border}`, background: T.panelBg,
+              overflow: 'hidden',
+            }}>
+
+              {/* ---- Controls Panel (top half, scrollable) ---- */}
+              <div
+                ref={rightPanelRef}
+                style={{ flex: '1 1 0', overflowY: 'auto', padding: 20 }}
+              >
+                {/* Atlas Version Switch */}
+                <div style={{ marginBottom: 22, borderBottom: `1px solid ${T.border}`, pb: 12 }}>
+                  <div style={{ fontFamily: T.fontMono, fontSize: 10, color: T.textMuted, letterSpacing: '0.1em', marginBottom: 8 }}>ATLAS STANDARD</div>
+                  <div style={{ display: 'flex', gap: 4, background: '#F0EDE6', padding: 3, borderRadius: 6 }}>
+                    {['p4', 'adult'].map(v => (
+                      <button
+                        key={v}
+                        onClick={() => {
+                          if (v === atlasVersion) return;
+                          setAtlasVersion(v);
+                          setSliceResult(null); // Clear slice on atlas switch
+                        }}
+                        style={{
+                          flex: 1, padding: '6px 0', border: 'none', borderRadius: 4,
+                          fontFamily: T.fontMono, fontSize: 10, fontWeight: 600,
+                          cursor: 'pointer', textTransform: 'uppercase',
+                          background: atlasVersion === v ? T.bg : 'transparent',
+                          color: atlasVersion === v ? T.accent : T.textMuted,
+                          boxShadow: atlasVersion === v ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+                          transition: 'all 0.2s',
+                        }}
+                      >
+                        {v === 'p4' ? 'P4 Developmental' : 'Adult CCFv3'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <h1 style={{
+                  fontFamily: T.fontSerif, fontSize: 18, fontWeight: 600,
+                  color: T.text, margin: '0 0 20px 0', lineHeight: 1.2,
+                }}>
+                  Slice Planner
+                </h1>
+
+                {/* Visual schematic of current orientation */}
+                <div style={{ 
+                  background: '#F0EDE6', borderRadius: 8, padding: '12px 0 16px 0', 
+                  marginBottom: 22, border: `1px solid ${T.border}` 
+                }}>
+                  <AnatomySchematic topAngle={sliceState.yaw} sideAngle={sliceState.roll} />
+                  <div style={{ height: 16 }} />
+                  <DistanceMeter apPosition={sliceState.apPosition} atlasVersion={atlasVersion} />
+                </div>
+
+                {/* Circuit Presets */}
+                <div style={{ marginBottom: 22 }}>
+                  <div style={{
+                    fontFamily: T.fontMono, fontSize: 10, letterSpacing: '0.1em',
+                    color: T.textMuted, marginBottom: 8, textTransform: 'uppercase',
+                  }}>
+                    Circuit Presets
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {[
+                      { id: 'tc',    label: 'Thalamocortical' },
+                      { id: 'hippo', label: 'Hippocampal' },
+                      { id: 'reset', label: 'Reset' },
+                    ].map(({ id, label }) => {
+                      const isActive = id !== 'reset' && highlightState.preset === id;
+                      return (
+                        <button key={id} onClick={() => handlePreset(id)} style={{
+                          fontFamily: T.fontMono, fontSize: 11, padding: '6px 10px',
+                          borderRadius: 4, border: `1px solid ${isActive ? T.gold : T.border}`,
+                          background: isActive ? '#FDF6E3' : T.bg, color: T.text,
+                          cursor: 'pointer', transition: 'border-color 0.15s, background 0.15s',
+                        }}>
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Slice Thickness */}
+                <div>
+                  <div style={{
+                    fontFamily: T.fontMono, fontSize: 10, letterSpacing: '0.1em',
+                    color: T.textMuted, marginBottom: 8, textTransform: 'uppercase',
+                  }}>
+                    Slice Thickness
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {THICKNESS_OPTIONS.map((val, i) => {
+                      const lbl    = THICKNESS_LABELS[i];
+                      const active = selectedThickness === lbl;
+                      return (
+                        <button key={val} onClick={() => handleThickness(val, lbl)} style={{
+                          fontFamily: T.fontMono, fontSize: 11, padding: '5px 10px',
+                          borderRadius: 20, border: `1px solid ${active ? 'transparent' : T.border}`,
+                          background: active ? T.accent : T.bg,
+                          color: active ? '#FFFFFF' : T.text,
+                          cursor: 'pointer', transition: 'background 0.15s, color 0.15s',
+                        }}>
+                          {lbl}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* Divider */}
+              <div style={{ height: 1, background: T.border, flexShrink: 0 }} />
+
+              {/* ================================================================
+                  Slice Output Panel (bottom half)
+              ================================================================ */}
+              <div style={{
+                flex: '0 0 auto', minHeight: 460, padding: 16,
+                display: 'flex', flexDirection: 'column', overflowY: 'auto',
+              }}>
+
+                {sliceResult === null ? (
+                  <>
+                    <div style={{
+                      border: `1px dashed ${T.border}`, borderRadius: 6,
+                      padding: '24px 16px', textAlign: 'center',
+                      marginBottom: 16, background: T.bg,
+                    }}>
+                      <p style={{ fontFamily: T.fontMono, fontSize: 11, color: T.textMuted, margin: '0 0 4px 0', lineHeight: 1.5 }}>
+                        Configure slice orientation above,
+                      </p>
+                      <p style={{ fontFamily: T.fontMono, fontSize: 11, color: T.textMuted, margin: 0, lineHeight: 1.5 }}>
+                        then click Generate Slice
+                      </p>
+                    </div>
+
+                    <button onClick={handleGenerateSlice} style={{
+                      width: '100%', background: T.accent, color: '#FFFFFF',
+                      fontFamily: T.fontSerif, fontSize: 15, fontWeight: 600,
+                      padding: '12px 0', borderRadius: 6, border: 'none',
+                      cursor: 'pointer', letterSpacing: '0.01em',
+                    }}>
+                      Generate Slice
+                    </button>
+
+                    <button
+                      onClick={handleSaveSlice}
+                      disabled={!sliceResult}
+                      style={{
+                        width: '100%', marginTop: 8,
+                        fontFamily: T.fontSerif, fontSize: 14,
+                        padding: '10px', borderRadius: 6,
+                        cursor: 'not-allowed',
+                        background: '#FAF8F5',
+                        border: `1px solid ${T.border}`,
+                        color: '#AAA098',
+                      }}
+                    >
+                      Save Slice
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {/* Slice title with parameter badges and Cancel button */}
+                    <div style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      marginBottom: 6, flexWrap: 'wrap', gap: 4,
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontFamily: T.fontMono, fontSize: 10, letterSpacing: '0.1em', color: T.textMuted }}>
+                          SLICE PREVIEW &middot; {atlasVersion === 'p4' ? 'P4' : 'Adult'}
+                        </span>
+                        <button 
+                          onClick={() => setSliceResult(null)}
+                          title="Cancel and return to configuration"
+                          style={{
+                            background: 'none', border: 'none', cursor: 'pointer',
+                            color: T.accent, fontSize: 14, fontWeight: 'bold', padding: '0 4px',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          }}
+                        >✕</button>
+                      </div>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {highlightState.preset && (
+                          <span style={{
+                            fontFamily: T.fontMono, fontSize: 10,
+                            background: '#FDF6E3', border: `1px solid ${T.gold}`,
+                            color: T.gold, borderRadius: 10, padding: '2px 7px',
+                          }}>
+                            {highlightState.preset === 'tc' ? 'Thalamocortical' : 'Hippocampal'}
+                          </span>
+                        )}
+                        {[
+                          ['Top',  sliceResult.yaw,       '°'],
+                          ['Side', sliceResult.roll,      '°'],
+                          ['Thick', sliceResult.thickness,  ''],
+                        ].map(([k, v, u]) => (
+                          <span key={k} style={{
+                            fontFamily: T.fontMono, fontSize: 10,
+                            background: '#F0EDE6', border: `1px solid ${T.border}`,
+                            color: '#5A5450', borderRadius: 10, padding: '2px 7px',
+                          }}>
+                            {k} {v}{u}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Visual orientation and distance in preview mode */}
+                    <div style={{ 
+                      background: '#F0EDE6', borderRadius: 8, padding: '12px 0 16px 0', 
+                      marginBottom: 16, border: `1px solid ${T.border}` 
+                    }}>
+                      <AnatomySchematic topAngle={sliceResult.yaw} sideAngle={sliceResult.roll} />
+                      <div style={{ height: 16 }} />
+                      <DistanceMeter apPosition={sliceResult.apPosition} atlasVersion={atlasVersion} />
+                    </div>
+
+                    {/* Selected Structure Info */}
+                    {slice2DHover && (
+                      <div style={{
+                        marginBottom: 8, padding: '4px 8px', background: '#F0EDE6',
+                        borderRadius: 4, border: `1px solid ${T.border}`,
+                        fontFamily: T.fontMono, fontSize: 10, color: T.text,
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                      }}>
+                        <span>
+                          <strong>{slice2DHover.acronym}</strong>: {slice2DHover.name}
+                        </span>
+                        <button 
+                          onClick={() => setSlice2DHover(null)}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.textMuted, fontSize: 12 }}
+                        >✕</button>
+                      </div>
+                    )}
+
+                    {/* 2D cross-section canvas */}
+                    <canvas
+                      ref={sliceCanvasRef}
+                      onPointerDown={handle2DPointerDown}
+                      onPointerMove={handle2DPointerMove}
+                      onPointerUp={handle2DPointerUp}
+                      onWheel={handle2DWheel}
+                      onClick={handle2DClick}
+                      style={{
+                        width: '100%', height: '300px', display: 'block',
+                        borderRadius: 4, border: `1px solid ${T.border}`,
+                        marginBottom: 12, background: '#FAF8F5',
+                        cursor: 'crosshair', touchAction: 'none'
+                      }}
+                    />
+
+                    {/* Structure list */}
+                    <div style={{ fontFamily: T.fontMono, fontSize: 10, letterSpacing: '0.1em', color: T.textMuted, marginTop: 12, marginBottom: 6 }}>
+                      INTERSECTED STRUCTURES ({sliceResult.intersections.length})
+                    </div>
+
+                    {sliceResult.intersections.length === 0 ? (
+                      <div style={{ fontFamily: T.fontMono, fontSize: 11, color: T.textMuted, textAlign: 'center', padding: '16px 0' }}>
+                        No structures at this plane position.<br/>Try adjusting A→P position or pitch.
+                      </div>
+                    ) : (
+                      <div style={{ overflowY: 'auto', flex: 1 }}>
+                        {sliceResult.intersections.map(ix => {
+                          const isHighlighted = highlightState.highlighted.includes(ix.acronym);
+                          const groupColor    = GROUP_COLORS[ix.group] || '#888';
+                          return (
+                            <div key={ix.acronym} style={{
+                              display: 'flex', alignItems: 'center', gap: 8,
+                              padding: '4px 8px', borderRadius: 4,
+                              background: isHighlighted ? hexToRgba(ix.color, 0.07) : 'transparent',
+                            }}>
+                              <div style={{ width: 10, height: 10, borderRadius: '50%', background: ix.color, flexShrink: 0 }} />
+                              <span style={{ fontFamily: T.fontMono, fontWeight: 'bold', fontSize: 11, color: ix.color, minWidth: 52 }}>
+                                {ix.acronym}
+                              </span>
+                              <span style={{ fontFamily: T.fontMono, fontSize: 11, color: '#5A5450', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {ix.name}
+                              </span>
+                              <span style={{ fontFamily: T.fontMono, fontSize: 9, background: hexToRgba(groupColor, 0.15), color: groupColor, borderRadius: 3, padding: '2px 6px', flexShrink: 0 }}>
+                                {ix.group}
+                              </span>
+                              {isHighlighted && <span style={{ color: T.gold, fontSize: 10, flexShrink: 0 }}>★</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Export buttons */}
+                    <div style={{ display: 'flex', gap: 8, marginTop: 12, padding: '0 0 8px' }}>
+                      <button onClick={handleExportPNG} style={{
+                        flex: 1, fontFamily: T.fontMono, fontSize: 11, padding: '7px 0',
+                        borderRadius: 4, cursor: 'pointer',
+                        background: '#FAF8F5', border: `1px solid ${T.accent}`, color: T.accent,
+                      }}>
+                        Export PNG
+                      </button>
+                      <button onClick={handleExportConfig} style={{
+                        flex: 1, fontFamily: T.fontMono, fontSize: 11, padding: '7px 0',
+                        borderRadius: 4, cursor: 'pointer',
+                        background: T.accent, border: `1px solid ${T.accent}`, color: 'white',
+                      }}>
+                        Export Config
+                      </button>
+                    </div>
+
+                    {/* Save and Cancel row */}
+                    <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                      <button
+                        onClick={handleSaveSlice}
+                        style={{
+                          flex: 2, fontFamily: T.fontSerif, fontSize: 14,
+                          padding: '10px', borderRadius: 6, cursor: 'pointer',
+                          background: '#FAF8F5', border: `1px solid ${T.gold}`, color: T.gold,
+                        }}
+                      >
+                        Save Slice
+                      </button>
+                      <button
+                        onClick={() => setSliceResult(null)}
+                        style={{
+                          flex: 1, fontFamily: T.fontMono, fontSize: 13,
+                          padding: '10px', borderRadius: 6, cursor: 'pointer',
+                          background: '#F0EDE6', border: `1px solid ${T.border}`, color: T.textMuted,
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+
+                    {/* Re-generate button */}
+                    <button onClick={handleGenerateSlice} style={{
+                      width: '100%', marginTop: 8,
+                      background: T.accent, color: '#FFFFFF',
+                      fontFamily: T.fontSerif, fontSize: 14, fontWeight: 600,
+                      padding: '10px 0', borderRadius: 6, border: 'none',
+                      cursor: 'pointer', letterSpacing: '0.01em',
+                    }}>
+                      Re-generate Slice
+                    </button>
+                  </>
+                )}
+
+                {/* ================================================================
+                    Saved Slices Panel
+                ================================================================ */}
+                <div style={{ marginTop: 16, borderTop: '1px solid #DDD8CE', paddingTop: 12 }}>
+                  <div
+                    style={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      cursor: 'pointer', marginBottom: savedSlicesPanelOpen ? 8 : 0,
+                    }}
+                    onClick={() => setSavedSlicesPanelOpen(o => !o)}
+                  >
+                    <span style={{ fontFamily: '"DM Mono",monospace', fontSize: 10, letterSpacing: '0.1em', color: '#8A8078' }}>
+                      SAVED SLICES ({savedSlices.length})
+                    </span>
+                    <span style={{ fontSize: 10, color: '#8A8078' }}>{savedSlicesPanelOpen ? '▾' : '▸'}</span>
+                  </div>
+
+                  {savedSlicesPanelOpen && (
+                    <>
+                      {savedSlices.length === 0 ? (
+                        <div style={{ fontFamily: '"DM Mono",monospace', fontSize: 10, color: '#AAA098', padding: '8px 0' }}>
+                          No saved slices yet. Generate a slice and click "Save".
+                        </div>
+                      ) : (
+                        savedSlices.map(entry => (
+                          <div key={entry.id} style={{
+                            display: 'flex', alignItems: 'center', gap: 8,
+                            padding: '6px 0', borderBottom: '1px solid #F0EDE6',
+                          }}>
+                            {entry.thumbnail ? (
+                              <img src={entry.thumbnail} width={60} height={45}
+                                   style={{ borderRadius: 3, border: '1px solid #DDD8CE', flexShrink: 0 }}
+                                   alt={entry.name} />
+                            ) : (
+                              <div style={{ width: 60, height: 45, background: '#F0EDE6', borderRadius: 3, flexShrink: 0 }} />
+                            )}
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{
+                                fontFamily: '"DM Mono",monospace', fontSize: 11, fontWeight: 'bold', color: '#3D3530',
+                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                              }}>
+                                {entry.name}
+                              </div>
+                              <div style={{ fontFamily: '"DM Mono",monospace', fontSize: 9, color: '#8A8078' }}>
+                                P:{entry.pitch}° Y:{entry.yaw}° R:{entry.roll}° | {entry.thickness}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => handleRecallSlice(entry)}
+                              style={{
+                                fontFamily: '"DM Mono",monospace', fontSize: 10,
+                                background: '#FAF8F5', border: '1px solid #4A6741',
+                                color: '#4A6741', borderRadius: 3, padding: '3px 7px',
+                                cursor: 'pointer', flexShrink: 0,
+                              }}
+                            >
+                              ↩
+                            </button>
+                            <button
+                              onClick={() => handleDeleteSlice(entry.id)}
+                              style={{
+                                fontFamily: '"DM Mono",monospace', fontSize: 10,
+                                background: 'transparent', border: 'none',
+                                color: '#AAA098', cursor: 'pointer', padding: '3px', flexShrink: 0,
+                              }}
+                              onMouseEnter={e => e.target.style.color = '#C0392B'}
+                              onMouseLeave={e => e.target.style.color = '#AAA098'}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ))
+                      )}
+
+                      {showSaveInput && (
+                        <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                          <input
+                            autoFocus
+                            type="text"
+                            value={saveNameInput}
+                            onChange={e => setSaveNameInput(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter')  confirmSaveSlice();
+                              if (e.key === 'Escape') setShowSaveInput(false);
+                            }}
+                            placeholder={`Slice ${savedSlices.length + 1}`}
+                            style={{
+                              flex: 1, fontFamily: '"DM Mono",monospace', fontSize: 11,
+                              border: '1px solid #DDD8CE', borderRadius: 4, padding: '4px 8px',
+                              background: '#FAF8F5', color: '#3D3530', minWidth: 0,
+                            }}
+                          />
+                          <button onClick={confirmSaveSlice} style={{
+                            fontFamily: '"DM Mono",monospace', fontSize: 10,
+                            background: '#4A6741', color: 'white', border: 'none',
+                            borderRadius: 4, padding: '4px 10px', cursor: 'pointer',
+                          }}>
+                            Save
+                          </button>
+                          <button onClick={() => setShowSaveInput(false)} style={{
+                            fontFamily: '"DM Mono",monospace', fontSize: 10,
+                            background: '#FAF8F5', color: '#8A8078',
+                            border: '1px solid #DDD8CE', borderRadius: 4,
+                            padding: '4px 10px', cursor: 'pointer',
+                          }}>
+                            Cancel
+                          </button>
+                        </div>
+                      )}
+
+                      <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
+                        <button
+                          onClick={handleExportSession}
+                          disabled={savedSlices.length === 0}
+                          style={{
+                            flex: 1, fontFamily: '"DM Mono",monospace', fontSize: 10,
+                            padding: '6px 0', borderRadius: 4,
+                            cursor: savedSlices.length ? 'pointer' : 'not-allowed',
+                            background: '#FAF8F5', border: '1px solid #DDD8CE',
+                            color: savedSlices.length ? '#3D3530' : '#AAA098',
+                          }}
+                        >
+                          Export Session
+                        </button>
+                        <button
+                          onClick={() => importFileRef.current?.click()}
+                          style={{
+                            flex: 1, fontFamily: '"DM Mono",monospace', fontSize: 10,
+                            padding: '6px 0', borderRadius: 4, cursor: 'pointer',
+                            background: '#FAF8F5', border: '1px solid #DDD8CE', color: '#3D3530',
+                          }}
+                        >
+                          Import Session
+                        </button>
+                        <input
+                          ref={importFileRef}
+                          type="file" accept=".json"
+                          style={{ display: 'none' }}
+                          onChange={handleImportSession}
+                        />
+                      </div>
+
+                      {importMsg && (
+                        <div style={{ fontFamily: '"DM Mono",monospace', fontSize: 10, color: '#4A6741', marginTop: 6 }}>
+                          {importMsg}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+                {/* end Saved Slices Panel */}
+
+              </div>{/* end Slice Output Panel */}
+            </div>{/* end right panel */}
+          </div>{/* end root container */}
+        </>
+      );
+    }
+
+    // Mount the component
+    console.log('Mounting AllenAtlasSlicePlanner...');
+    try {
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<AllenAtlasSlicePlanner />);
+      console.log('Render called.');
+    } catch (e) {
+      console.error('Mounting failed:', e);
+    }
+  </script>
+</body>
+</html>
