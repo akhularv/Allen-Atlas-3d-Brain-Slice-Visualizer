@@ -22,7 +22,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500&family=Playfair+Display:wght@400;600&display=swap">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body, #root { width: 100%; height: 100%; overflow: hidden; }
+    html, body, #root { width: 100%; height: 100%; min-height: 100dvh; overflow: hidden; }
 
     /* Slider thumb accent */
     input[type="range"] {
@@ -86,7 +86,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 56px;
+      width: 100%;
       height: 100%;
       overflow: hidden;
       position: relative;
@@ -517,6 +517,18 @@
       };
     }
 
+    function ccfRawToThree(ccfX, ccfY, ccfZ, atlasVersion) {
+      if (!isFinite(ccfX) || !isFinite(ccfY) || !isFinite(ccfZ)) {
+        throw new Error(`ccfRawToThree: non-finite input (${ccfX}, ${ccfY}, ${ccfZ})`);
+      }
+      const scale = atlasVersion === 'p4' ? 0.57 : 1.0;
+      return {
+        x: (ccfZ - 5700) * scale,
+        y: -(ccfY - 4000) * scale,
+        z: -(ccfX - 5700) * scale,
+      };
+    }
+
     // ---------------------------------------------------------------------------
     // buildSlicePlane v3 — Stage 6 axis remapping preserved
     // Stage 6 FIX 1: roll→Euler X (somersault), yaw→Euler Y, pitch→Euler Z (axial spin)
@@ -704,10 +716,314 @@
       '350µm': 350, '400µm': 400, '1mm': 1000, '2mm': 2000, '4mm': 4000, '6mm': 6000,
     });
 
+    const EXPRESSION_OVERLAY_META = Object.freeze({
+      Slc17a6: Object.freeze({
+        label: 'VGluT2',
+        color: '#F28C28',
+        circuit: 'Thalamocortical relay / diencephalon',
+        note: 'Best interpreted as a broad relay-glutamatergic gradient, not a cortex-only map.',
+      }),
+      Slc6a4: Object.freeze({
+        label: 'SERT',
+        color: '#D74E6A',
+        circuit: 'Transient thalamocortical axon marker',
+        note: 'Use cautiously: this is exploratory expression data, not validated protein-only signal.',
+      }),
+      Tbr1: Object.freeze({
+        label: 'TBR1',
+        color: '#4A6FD1',
+        circuit: 'Layer VI corticothalamic neurons',
+        note: 'Should read as a deep-cortical / corticothalamic gradient rather than a thalamic relay marker.',
+      }),
+    });
+
+    function getVisibleIntersections(sliceLike, visibilityState) {
+      if (!sliceLike?.intersections) return [];
+      return sliceLike.intersections.filter(ix => visibilityState?.[ix.acronym] !== false);
+    }
+
+    function getSliceThicknessMicrons(sliceLike) {
+      return THICKNESS_TO_MICRONS[sliceLike?.thickness] ?? 400;
+    }
+
+    function formatSignedValue(value, unit = '') {
+      if (!Number.isFinite(value)) return `0${unit}`;
+      const rounded = Math.round(value);
+      return `${rounded >= 0 ? '+' : ''}${rounded}${unit}`;
+    }
+
+    function formatExpressionValue(value) {
+      if (!Number.isFinite(value)) return '0.00';
+      return value.toFixed(2);
+    }
+
+    function formatCount(value) {
+      if (!Number.isFinite(value)) return '0';
+      return new Intl.NumberFormat('en-US').format(Math.round(value));
+    }
+
+    function percentile(sortedValues, q) {
+      if (!Array.isArray(sortedValues) || sortedValues.length === 0) return 0;
+      const clamped = Math.max(0, Math.min(1, q));
+      const index = (sortedValues.length - 1) * clamped;
+      const lower = Math.floor(index);
+      const upper = Math.ceil(index);
+      if (lower === upper) return sortedValues[lower];
+      const weight = index - lower;
+      return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight;
+    }
+
+    function getExpressionSourceLabel(source) {
+      if (source === 'expression') return 'server data';
+      if (source === 'expression_data.json') return 'local data';
+      return source || 'unavailable';
+    }
+
+    const EXPRESSION_SAMPLE_SPACING_MICRONS = 200;
+    const EXPRESSION_MIN_VISIBLE_NORMALIZED = 0.04;
+    const EXPRESSION_PLANE_OFFSET_MICRONS = 18;
+
+    function getPanelWidthBounds(innerWidth = window.innerWidth) {
+      if (innerWidth >= 2200) return { min: 22, max: 90, initial: 70 };
+      if (innerWidth >= 1700) return { min: 24, max: 88, initial: 68 };
+      if (innerWidth >= 1400) return { min: 26, max: 86, initial: 64 };
+      return { min: 30, max: 80, initial: 60 };
+    }
+
+    function isPointInsideFallbackBrain(pointWorld, atlasVersion) {
+      const shellScale = atlasVersion === 'p4' ? 0.57 : 1.0;
+      const nx = pointWorld.x / (5700 * shellScale);
+      const ny = pointWorld.y / (4000 * shellScale);
+      const nz = pointWorld.z / (6500 * shellScale);
+      return (nx * nx + ny * ny + nz * nz) <= 1.02;
+    }
+
+    function isPointInsideBrain(pointWorld, atlasVersion) {
+      // Keep the mask cheap enough for interactive toggling.
+      // The developmental expression points are already atlas-sampled; once the
+      // raw-CCF transform is correct, an atlas-shell envelope is a good tradeoff
+      // between plausibility and responsiveness.
+      return isPointInsideFallbackBrain(pointWorld, atlasVersion);
+    }
+
+    function getPlaneAxes(plane) {
+      const THREE = window.THREE;
+      if (!THREE || !plane?.normal) return null;
+      const normal = plane.normal.clone().normalize();
+      const up = Math.abs(normal.y) < 0.99 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+      const uAxis = new THREE.Vector3().crossVectors(up, normal).normalize();
+      const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
+      return { normal, uAxis, vAxis };
+    }
+
+    function getExpressionSliceInclusionWindowMicrons(sliceLike) {
+      const thicknessMicrons = getSliceThicknessMicrons(sliceLike);
+      return thicknessMicrons / 2 + EXPRESSION_SAMPLE_SPACING_MICRONS / 2;
+    }
+
+    function getExpressionVisibilityStrength(normalized) {
+      if (!Number.isFinite(normalized)) return 0;
+      const trimmed = Math.max(0, (normalized - EXPRESSION_MIN_VISIBLE_NORMALIZED) / (1 - EXPRESSION_MIN_VISIBLE_NORMALIZED));
+      return Math.pow(trimmed, 1.12);
+    }
+
+    function getSliceProjection(sliceLike, visibilityState, orbit, width, height) {
+      const THREE = window.THREE;
+      if (!THREE || !sliceLike?.plane) return null;
+      const intersections = getVisibleIntersections(sliceLike, visibilityState);
+      const normal = sliceLike.plane.normal;
+      const up = Math.abs(normal.y) < 0.99 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+      const uAxis = new THREE.Vector3().crossVectors(up, normal).normalize();
+      const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
+
+      let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+      intersections.forEach(intersection => {
+        intersection.segments.forEach(seg => {
+          ['start', 'end'].forEach(key => {
+            const u = seg[key].dot(uAxis);
+            const v = -seg[key].dot(vAxis);
+            if (u < uMin) uMin = u;
+            if (u > uMax) uMax = u;
+            if (v < vMin) vMin = v;
+            if (v > vMax) vMax = v;
+          });
+        });
+      });
+
+      if (!isFinite(uMin)) {
+        return {
+          intersections,
+          uAxis,
+          vAxis,
+          uMin: -1,
+          uMax: 1,
+          vMin: -1,
+          vMax: 1,
+          baseScale: 1,
+          SCALE: orbit.zoom || 1,
+          uCenter: 0,
+          vCenter: 0,
+          cx: width / 2 + (orbit.panX || 0),
+          cy: height / 2 + (orbit.panY || 0),
+          W: width,
+          H: height,
+        };
+      }
+
+      const rangeU = uMax - uMin || 1;
+      const rangeV = vMax - vMin || 1;
+      const baseScale = Math.min((width * 0.8) / rangeU, (height * 0.8) / rangeV);
+      const SCALE = baseScale * (orbit.zoom || 1);
+      const uCenter = (uMin + uMax) / 2;
+      const vCenter = (vMin + vMax) / 2;
+
+      return {
+        intersections,
+        uAxis,
+        vAxis,
+        uMin,
+        uMax,
+        vMin,
+        vMax,
+        baseScale,
+        SCALE,
+        uCenter,
+        vCenter,
+        cx: width / 2 - uCenter * SCALE + (orbit.panX || 0),
+        cy: height / 2 - vCenter * SCALE + (orbit.panY || 0),
+        W: width,
+        H: height,
+      };
+    }
+
+    function getExpressionSliceSamples(sliceLike, expressionOverlay, atlasVersion, brainMask = null) {
+      const THREE = window.THREE;
+      if (!THREE || !sliceLike?.plane || !expressionOverlay?.activeGene) return [];
+      const points = expressionOverlay.pointsByGene?.[expressionOverlay.activeGene];
+      if (!Array.isArray(points) || points.length === 0) return [];
+
+      const range = expressionOverlay.ranges?.[expressionOverlay.activeGene];
+      if (!range) return [];
+
+      const axes = getPlaneAxes(sliceLike.plane);
+      if (!axes) return [];
+
+      const scale = atlasVersion === 'p4' ? 0.57 : 1.0;
+      const planeWindowMicrons = getExpressionSliceInclusionWindowMicrons(sliceLike);
+      const planeWindowWorld = planeWindowMicrons * scale;
+      const planeOffsetWorld = Math.min(planeWindowWorld * 0.12, EXPRESSION_PLANE_OFFSET_MICRONS * scale);
+      const normMin = Number.isFinite(range.p05) ? range.p05 : range.min;
+      const normMax = Number.isFinite(range.p95) ? range.p95 : range.max;
+      const energySpan = Math.max(1e-6, normMax - normMin);
+
+      return points.reduce((acc, point) => {
+        const [ap, dv, ml, energy] = point;
+        if (!isFinite(energy)) return acc;
+
+        const pos = ccfRawToThree(ap, dv, ml, atlasVersion);
+        const center = new THREE.Vector3(pos.x, pos.y, pos.z);
+        if (brainMask && !brainMask(center)) return acc;
+
+        const centerDistance = sliceLike.plane.distanceToPoint(center);
+        if (Math.abs(centerDistance) > planeWindowWorld) return acc;
+
+        const normalized = Math.max(0, Math.min(1, (energy - normMin) / energySpan));
+        const strength = getExpressionVisibilityStrength(normalized);
+        if (strength <= 0) return acc;
+
+        const planePoint = sliceLike.plane
+          .projectPoint(center, new THREE.Vector3())
+          .addScaledVector(axes.normal, planeOffsetWorld);
+        const distanceWeight = 1 - Math.abs(centerDistance) / Math.max(planeWindowWorld, 1e-6);
+
+        acc.push({
+          centerWorld: center,
+          world: planePoint,
+          planePoint,
+          normalized,
+          strength,
+          alpha: Math.min(0.9, (expressionOverlay.opacity ?? 1) * (0.18 + 0.82 * strength) * (0.4 + 0.6 * distanceWeight)),
+          radius2D: atlasVersion === 'p4' ? 2.25 : 2.55,
+          size3D: atlasVersion === 'p4' ? 7.8 : 8.8,
+          energy,
+          sourceDistance: Math.abs(centerDistance),
+        });
+
+        return acc;
+      }, []);
+    }
+
+    function getIntersectionPolygonPoints(intersection, projection) {
+      if (!intersection?.segments?.length || !projection?.uAxis || !projection?.vAxis) return [];
+      const points = [];
+      intersection.segments.forEach(seg => {
+        ['start', 'end'].forEach(key => {
+          points.push({
+            x: seg[key].dot(projection.uAxis) * projection.SCALE + projection.cx,
+            y: (-seg[key].dot(projection.vAxis)) * projection.SCALE + projection.cy,
+          });
+        });
+      });
+      if (!points.length) return [];
+      const centerX = intersection.centroid.dot(projection.uAxis) * projection.SCALE + projection.cx;
+      const centerY = (-intersection.centroid.dot(projection.vAxis)) * projection.SCALE + projection.cy;
+      return points.sort(
+        (a, b) => Math.atan2(a.y - centerY, a.x - centerX) - Math.atan2(b.y - centerY, b.x - centerX)
+      );
+    }
+
+    function traceIntersectionsPath(ctx, intersections, projection) {
+      let hasPath = false;
+      intersections.forEach(intersection => {
+        const polygon = getIntersectionPolygonPoints(intersection, projection);
+        if (polygon.length < 3) return;
+        ctx.moveTo(polygon[0].x, polygon[0].y);
+        polygon.slice(1).forEach(point => ctx.lineTo(point.x, point.y));
+        ctx.closePath();
+        hasPath = true;
+      });
+      return hasPath;
+    }
+
+    function drawExpressionOverlay2D(ctx, samples, activeGeneMeta, intersections, projection) {
+      if (!ctx || !Array.isArray(samples) || !samples.length || !activeGeneMeta || !projection) return;
+      const rgb = activeGeneMeta.color
+        .replace('#', '')
+        .match(/.{2}/g)
+        .map(value => parseInt(value, 16));
+
+      ctx.save();
+      ctx.beginPath();
+      if (!traceIntersectionsPath(ctx, intersections, projection)) {
+        ctx.restore();
+        return;
+      }
+      ctx.clip();
+
+      samples.forEach(sample => {
+        const x = sample.planePoint.dot(projection.uAxis) * projection.SCALE + projection.cx;
+        const y = (-sample.planePoint.dot(projection.vAxis)) * projection.SCALE + projection.cy;
+        const haloAlpha = Math.min(0.18, sample.alpha * 0.42);
+        const fillAlpha = Math.min(0.52, sample.alpha * 0.92);
+
+        ctx.fillStyle = `rgba(255,255,255,${haloAlpha})`;
+        ctx.beginPath();
+        ctx.arc(x, y, sample.radius2D + 1.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${fillAlpha})`;
+        ctx.beginPath();
+        ctx.arc(x, y, sample.radius2D, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      ctx.restore();
+    }
+
     // ---------------------------------------------------------------------------
     // ChunkSliceThumb — thumbnail canvas for one slice in the filmstrip
     // ---------------------------------------------------------------------------
-    function ChunkSliceThumb({ slice, index, total }) {
+    function ChunkSliceThumb({ slice, index, total, isSelected, visibilityState, onClick }) {
       const canvasRef = React.useRef(null);
       React.useEffect(() => {
         const canvas = canvasRef.current;
@@ -718,21 +1034,29 @@
         canvas.width = W; canvas.height = H;
         const ctx = canvas.getContext('2d');
         ctx.fillStyle = '#FAF8F5'; ctx.fillRect(0, 0, W, H);
+        const visibleIntersections = getVisibleIntersections(slice, visibilityState);
         const normal = slice.plane.normal;
         const up = Math.abs(normal.y) < 0.99 ? new THREE.Vector3(0,1,0) : new THREE.Vector3(1,0,0);
         const uAxis = new THREE.Vector3().crossVectors(up, normal).normalize();
         const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
         let uMin=Infinity,uMax=-Infinity,vMin=Infinity,vMax=-Infinity;
-        slice.intersections.forEach(ix => ix.segments.forEach(seg => {
+        visibleIntersections.forEach(ix => ix.segments.forEach(seg => {
           ['start','end'].forEach(k => {
             const u=seg[k].dot(uAxis), v=-seg[k].dot(vAxis);
             if(u<uMin)uMin=u; if(u>uMax)uMax=u; if(v<vMin)vMin=v; if(v>vMax)vMax=v;
           });
         }));
-        if (!isFinite(uMin)) return;
+        if (!isFinite(uMin)) {
+          ctx.fillStyle = '#B8B0A6';
+          ctx.font = 'bold 9px "DM Mono", monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('hidden', W / 2, H / 2 + 3);
+          ctx.textAlign = 'left';
+          return;
+        }
         const sc = Math.min(W*0.8/(uMax-uMin+1), H*0.8/(vMax-vMin+1));
         const cx = W/2-((uMin+uMax)/2)*sc, cy = H/2+((vMin+vMax)/2)*sc;
-        slice.intersections.forEach(ix => {
+        visibleIntersections.forEach(ix => {
           ctx.strokeStyle=ix.color; ctx.lineWidth=1;
           ix.segments.forEach(s => {
             ctx.beginPath();
@@ -741,19 +1065,32 @@
             ctx.stroke();
           });
         });
-      }, [slice]);
+      }, [slice, visibilityState]);
       const isCenter = index === Math.floor(total/2);
       const lbl = slice.offset>=0 ? `+${slice.offset}` : `${slice.offset}`;
       return (
-        <div style={{ flexShrink:0, display:'flex', flexDirection:'column', alignItems:'center' }}>
+        <button
+          onClick={onClick}
+          style={{
+            flexShrink: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            border: 'none',
+            background: 'transparent',
+            padding: 0,
+            cursor: 'pointer',
+          }}
+        >
           <canvas ref={canvasRef} width={90} height={70} style={{
-            border: isCenter ? '2px solid #4A6741' : '1px solid #DDD8CE',
+            border: isSelected ? '2px solid #C88B2A' : (isCenter ? '2px solid #4A6741' : '1px solid #DDD8CE'),
             borderRadius: 3, display:'block',
+            boxShadow: isSelected ? '0 0 0 2px rgba(200,139,42,0.18)' : 'none',
           }} />
-          <div style={{ fontSize:8, color:'#8A8078', fontFamily:'"DM Mono",monospace', marginTop:2 }}>
+          <div style={{ fontSize:8, color: isSelected ? '#A96E1A' : '#8A8078', fontFamily:'"DM Mono",monospace', marginTop:2 }}>
             {lbl}µm
           </div>
-        </div>
+        </button>
       );
     }
 
@@ -761,7 +1098,6 @@
     // Main Component
     // ---------------------------------------------------------------------------
     function AllenAtlasSlicePlanner() {
-      console.log('AllenAtlasSlicePlanner: rendering component cycle...');
       // ---- Shared state -------------------------------------------------------
       const [sliceState, setSliceState] = useState({
         pitch:      0,
@@ -817,13 +1153,14 @@
       const [chunkCount,   setChunkCount]   = useState(7);
       const [chunkSpacing, setChunkSpacing] = useState(300);
       const [chunkResult,  setChunkResult]  = useState(null);
+      const [activeChunkIndex, setActiveChunkIndex] = useState(null);
       const chunkPlanesRef = useRef([]);
       const chunkModeRef   = useRef(false);
       const chunkCountRef  = useRef(7);
       const chunkSpacingRef = useRef(300);
 
       // Resizable panels
-      const [leftWidth, setLeftWidth] = useState(60); // percentage
+      const [leftWidth, setLeftWidth] = useState(() => getPanelWidthBounds(window.innerWidth).initial); // percentage
       const isResizingRef = useRef(false);
 
       const onResizeMouseDown = useCallback((e) => {
@@ -835,8 +1172,9 @@
       useEffect(() => {
         const onMouseMove = (e) => {
           if (!isResizingRef.current) return;
+          const bounds = getPanelWidthBounds(window.innerWidth);
           const percentage = (e.clientX / window.innerWidth) * 100;
-          setLeftWidth(Math.max(30, Math.min(80, percentage)));
+          setLeftWidth(Math.max(bounds.min, Math.min(bounds.max, percentage)));
         };
         const onMouseUp = () => {
           if (!isResizingRef.current) return;
@@ -864,6 +1202,20 @@
       const [slice2DOrbit, setSlice2DOrbit] = useState({ panX: 0, panY: 0, zoom: 1 });
       const [slice2DHover, setSlice2DHover] = useState(null); // { acronym, name, group }
       const slice2DRef = useRef({ isDown: false, lastX: 0, lastY: 0 });
+      const [chunk2DOrbit, setChunk2DOrbit] = useState({ panX: 0, panY: 0, zoom: 1 });
+      const [chunk2DHover, setChunk2DHover] = useState(null);
+      const chunk2DRef = useRef({ isDown: false, lastX: 0, lastY: 0 });
+
+      const [expressionOverlay, setExpressionOverlay] = useState({
+        status: 'idle',
+        enabled: false,
+        activeGene: null,
+        opacity: 0.88,
+        pointsByGene: {},
+        ranges: {},
+        source: null,
+      });
+      const expressionCloudsRef = useRef([]);
 
       // Pages/static deployments default to the built-in ellipsoid mode.
       const shouldProbeBackend =
@@ -892,6 +1244,8 @@
       const meshLoadStateRef   = useRef({ total: 0, loaded: 0, failed: 0 });
       const rightPanelRef      = useRef(null);
       const importFileRef      = useRef(null);
+      const chunkCanvasRef     = useRef(null);
+      const groupCheckboxRefs  = useRef({});
 
       const rollSliderRef = useRef(null);
       const dvSliderRef   = useRef(null);
@@ -927,7 +1281,129 @@
 
       const lastRaycastTime = useRef(0);
 
+      const activeChunkSlice =
+        Array.isArray(chunkResult) && chunkResult.length > 0 && activeChunkIndex !== null
+          ? chunkResult[Math.max(0, Math.min(chunkResult.length - 1, activeChunkIndex))]
+          : null;
+
+      const expressionOverlaySupported = atlasVersion === 'p4';
+      const canToggleGradients = expressionOverlay.status === 'ready' && expressionOverlaySupported;
+      const expressionOverlayStats = useMemo(() => {
+        const genes = Object.keys(expressionOverlay.pointsByGene || {});
+        const totalSamples = genes.reduce((sum, gene) => {
+          const points = expressionOverlay.pointsByGene?.[gene];
+          return sum + (Array.isArray(points) ? points.length : 0);
+        }, 0);
+        const activeSamples = expressionOverlay.activeGene && Array.isArray(expressionOverlay.pointsByGene?.[expressionOverlay.activeGene])
+          ? expressionOverlay.pointsByGene[expressionOverlay.activeGene].length
+          : 0;
+        return {
+          geneCount: genes.length,
+          totalSamples,
+          activeSamples,
+        };
+      }, [expressionOverlay.pointsByGene, expressionOverlay.activeGene]);
+
+      const pointInsideBrain = useCallback((worldPoint) => {
+        return isPointInsideBrain(worldPoint, atlasVersion);
+      }, [atlasVersion]);
+
+      const expressionReferenceSlice = chunkMode && activeChunkSlice ? activeChunkSlice : sliceResult;
+      const activeExpressionSamples = useMemo(() => {
+        if (!expressionOverlay.enabled || !expressionOverlaySupported || !expressionReferenceSlice?.plane) return [];
+        return getExpressionSliceSamples(expressionReferenceSlice, expressionOverlay, atlasVersion, pointInsideBrain);
+      }, [expressionOverlay, expressionOverlaySupported, expressionReferenceSlice, atlasVersion, pointInsideBrain]);
+      const expressionSliceWindowMicrons = useMemo(() => {
+        return getExpressionSliceInclusionWindowMicrons(expressionReferenceSlice || { thickness: selectedThickness });
+      }, [expressionReferenceSlice, selectedThickness]);
+      const expressionSourceLabel = useMemo(() => {
+        return getExpressionSourceLabel(expressionOverlay.source);
+      }, [expressionOverlay.source]);
+
+      const handleToggleGradients = useCallback(() => {
+        if (!canToggleGradients) return;
+        setExpressionOverlay(prev => {
+          const nextEnabled = !prev.enabled;
+          const fallbackGene = Object.keys(prev.pointsByGene || {}).find(key => EXPRESSION_OVERLAY_META[key]) || 'Slc17a6';
+          return {
+            ...prev,
+            enabled: nextEnabled,
+            activeGene: nextEnabled ? (prev.activeGene || fallbackGene) : prev.activeGene,
+          };
+        });
+      }, [canToggleGradients]);
+
+      useEffect(() => {
+        if (!expressionOverlay.enabled || !canToggleGradients || expressionOverlay.activeGene) return;
+        const fallbackGene = Object.keys(expressionOverlay.pointsByGene || {}).find(key => EXPRESSION_OVERLAY_META[key]) || 'Slc17a6';
+        setExpressionOverlay(prev => {
+          if (!prev.enabled || prev.activeGene) return prev;
+          return {
+            ...prev,
+            activeGene: fallbackGene,
+          };
+        });
+      }, [canToggleGradients, expressionOverlay.activeGene, expressionOverlay.enabled, expressionOverlay.pointsByGene]);
+
       // ---- Backend health check (Stage 7) ------------------------------------
+      useEffect(() => {
+        let cancelled = false;
+
+        async function loadExpressionData() {
+          setExpressionOverlay(prev => ({ ...prev, status: 'loading' }));
+          const candidates = ['expression_data.json', 'expression'];
+          for (const target of candidates) {
+            try {
+              const response = await fetch(target, { cache: 'no-store' });
+              if (!response.ok) continue;
+              const data = await response.json();
+              const keys = Object.keys(data || {}).filter(key => EXPRESSION_OVERLAY_META[key]);
+              if (keys.length === 0) continue;
+
+              const ranges = {};
+              keys.forEach(key => {
+                const energies = data[key].map(point => point[3]).filter(Number.isFinite);
+                const sorted = [...energies].sort((a, b) => a - b);
+                ranges[key] = {
+                  min: Math.min(...energies),
+                  max: Math.max(...energies),
+                  p05: percentile(sorted, 0.05),
+                  p95: percentile(sorted, 0.95),
+                };
+              });
+
+              if (!cancelled) {
+                setExpressionOverlay(prev => ({
+                  ...prev,
+                  status: 'ready',
+                  pointsByGene: Object.fromEntries(keys.map(key => [key, data[key]])),
+                  ranges,
+                  source: target,
+                  activeGene: prev.activeGene && keys.includes(prev.activeGene) ? prev.activeGene : 'Slc17a6',
+                }));
+              }
+              return;
+            } catch (error) {
+              console.warn(`Expression overlay load failed for ${target}: ${error.message}`);
+            }
+          }
+
+          if (!cancelled) {
+            setExpressionOverlay(prev => ({
+              ...prev,
+              status: 'unavailable',
+              activeGene: null,
+              pointsByGene: {},
+              ranges: {},
+              source: null,
+            }));
+          }
+        }
+
+        loadExpressionData();
+        return () => { cancelled = true; };
+      }, []);
+
       useEffect(() => {
         if (!shouldProbeBackend) return;
         fetch('health', { signal: AbortSignal.timeout(3000) })
@@ -1279,6 +1755,7 @@ useEffect(() => {
         }
 
         function onPointerDown(e) {
+          if (e.target.closest?.('[data-ui-overlay="true"]')) return;
           if (viewLockedRef.current) return;
           const o = orbitRef.current;
           o.isPointerDown = true;
@@ -1288,6 +1765,7 @@ useEffect(() => {
         }
 
         function onPointerMove(e) {
+          if (e.target.closest?.('[data-ui-overlay="true"]')) return;
           if (viewLockedRef.current) return;
           const o = orbitRef.current;
           if (!o.isPointerDown) return;
@@ -1318,6 +1796,7 @@ useEffect(() => {
         }
 
         function onWheel(e) {
+          if (e.target.closest?.('[data-ui-overlay="true"]')) return;
           if (viewLockedRef.current) return;
           e.preventDefault();
           orbitRef.current.radius *= (1 + e.deltaY * 0.001);
@@ -1472,7 +1951,6 @@ useEffect(() => {
           targetMesh.frustumCulled = false;
           if (targetMesh.material) targetMesh.material.needsUpdate = true;
           onLoaded();
-          console.log(`Allen mesh applied: ${acronym} (${meshSource})`);
         }
 
         function loadStaticMesh(structureId, acronym, targetMesh) {
@@ -1551,6 +2029,112 @@ useEffect(() => {
         fetchAndApplyMesh(ROOT_MESH_ID, 'root', shellRef.current);
 
       }, [sceneReady, atlasVersion, backendStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+      useEffect(() => {
+        const THREE = window.THREE;
+        const scene = sceneRef.current;
+        if (!THREE || !scene || !sceneReady) return;
+
+        expressionCloudsRef.current.forEach(points => {
+          if (points.geometry) points.geometry.dispose();
+          if (points.material) points.material.dispose();
+          scene.remove(points);
+        });
+        expressionCloudsRef.current = [];
+
+        if (expressionOverlay.status !== 'ready' || !expressionOverlaySupported || !expressionOverlay.enabled) return;
+
+        const activeGene = expressionOverlay.activeGene;
+        const activeGeneMeta = activeGene ? EXPRESSION_OVERLAY_META[activeGene] : null;
+        if (!activeGene || !activeGeneMeta) return;
+        const currentPlane = buildSlicePlane(
+          sliceState.pitch,
+          sliceState.yaw,
+          sliceState.roll,
+          sliceState.apPosition,
+          sliceState.lrPosition,
+          sliceState.dvPosition
+        );
+        const displaySamples = getExpressionSliceSamples(
+          sliceResult?.plane ? sliceResult : { plane: currentPlane, thickness: selectedThickness },
+          expressionOverlay,
+          atlasVersion,
+          pointInsideBrain
+        );
+
+        if (!displaySamples.length) return;
+
+        const positions = [];
+        const colors = [];
+        const alphas = [];
+        const sizes = [];
+        const baseColor = new THREE.Color(activeGeneMeta.color);
+        const quietColor = new THREE.Color('#FBF8F2');
+
+        displaySamples.forEach(sample => {
+          positions.push(sample.world.x, sample.world.y, sample.world.z);
+          const c = quietColor.clone().lerp(baseColor, 0.18 + sample.strength * 0.82);
+          colors.push(c.r, c.g, c.b);
+          alphas.push(sample.alpha);
+          sizes.push(sample.size3D);
+        });
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+        geometry.setAttribute('alpha', new THREE.Float32BufferAttribute(alphas, 1));
+        geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+
+        const material = new THREE.ShaderMaterial({
+          transparent: true,
+          depthWrite: false,
+          depthTest: false,
+          vertexColors: true,
+          blending: THREE.NormalBlending,
+          vertexShader: `
+            attribute float alpha;
+            attribute float size;
+            varying vec3 vColor;
+            varying float vAlpha;
+
+            void main() {
+              vColor = color;
+              vAlpha = alpha;
+              vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+              gl_PointSize = size;
+              gl_Position = projectionMatrix * mvPosition;
+            }
+          `,
+          fragmentShader: `
+            varying vec3 vColor;
+            varying float vAlpha;
+
+            void main() {
+              vec2 centered = gl_PointCoord - vec2(0.5);
+              float dist = length(centered);
+              float falloff = smoothstep(0.5, 0.06, dist);
+              if (falloff <= 0.0) discard;
+              gl_FragColor = vec4(vColor, vAlpha * falloff);
+            }
+          `,
+        });
+
+        const cloud = new THREE.Points(geometry, material);
+        cloud.visible = true;
+        cloud.renderOrder = 4;
+        cloud.userData = { gene: activeGene, type: 'expression-reference-layer' };
+        scene.add(cloud);
+        expressionCloudsRef.current.push(cloud);
+
+        return () => {
+          expressionCloudsRef.current.forEach(points => {
+            if (points.geometry) points.geometry.dispose();
+            if (points.material) points.material.dispose();
+            scene.remove(points);
+          });
+          expressionCloudsRef.current = [];
+        };
+      }, [sceneReady, atlasVersion, expressionOverlay, expressionOverlaySupported, pointInsideBrain, selectedThickness, sliceResult, sliceState]);
 
       // ---------------------------------------------------------------------------
       // Axis indicator
@@ -1715,7 +2299,6 @@ useEffect(() => {
       // Region toggle handlers
       // ---------------------------------------------------------------------------
       const handleToggleStructure = useCallback((acronym, checked) => {
-        console.log(`Toggle structure: ${acronym} -> ${checked}`);
         if (!CCF_BY_ACRONYM[acronym]) { console.warn(`RegionTogglePanel: unknown acronym "${acronym}"`); return; }
         
         const mesh = meshMapRef.current[acronym];
@@ -1728,7 +2311,6 @@ useEffect(() => {
       }, []);
 
       const handleToggleGroup = useCallback((groupName, checked) => {
-        console.log(`Toggle group: ${groupName} -> ${checked}`);
         toggleGroup(groupName, checked, meshMapRef, setVisibilityState);
         
         // Sync ref immediately for animate loop
@@ -1747,6 +2329,23 @@ useEffect(() => {
       function isGroupChecked(groupName) {
         return (CCF_BY_GROUP[groupName] || []).every(a => visibilityState[a] !== false);
       }
+
+      function isGroupPartiallyChecked(groupName) {
+        const members = CCF_BY_GROUP[groupName] || [];
+        const visibleCount = members.filter(a => visibilityState[a] !== false).length;
+        return visibleCount > 0 && visibleCount < members.length;
+      }
+
+      useEffect(() => {
+        Object.keys(CCF_BY_GROUP).forEach(groupName => {
+          const checkbox = groupCheckboxRefs.current[groupName];
+          if (checkbox) checkbox.indeterminate = isGroupPartiallyChecked(groupName);
+        });
+      }, [visibilityState]);
+
+      const stopOverlayPointer = useCallback((e) => {
+        e.stopPropagation();
+      }, []);
 
       // ---------------------------------------------------------------------------
       // Generate Slice handler
@@ -1805,11 +2404,59 @@ useEffect(() => {
           const apPos  = sliceState.apPosition  - normal.z * offset;
           const plane  = buildSlicePlane(sliceState.pitch, sliceState.yaw, sliceState.roll, apPos, lrPos, dvPos);
           const ix     = computeAllIntersections(structureMeshesRef.current, plane);
-          slices.push({ index: i, offset: Math.round(offset), plane, intersections: ix, ...sliceState });
+          slices.push({
+            index: i,
+            offset: Math.round(offset),
+            plane,
+            intersections: ix,
+            thickness: selectedThickness,
+            pitch: sliceState.pitch,
+            yaw: sliceState.yaw,
+            roll: sliceState.roll,
+            apPosition: apPos,
+            lrPosition: lrPos,
+            dvPosition: dvPos,
+          });
         }
         setChunkResult(slices);
+        setActiveChunkIndex(Math.floor(slices.length / 2));
+        setChunk2DOrbit({ panX: 0, panY: 0, zoom: 1 });
+        setChunk2DHover(null);
         rightPanelRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-      }, [sliceState, chunkCount, chunkSpacing, computeAllIntersections]);
+      }, [sliceState, chunkCount, chunkSpacing, computeAllIntersections, selectedThickness]);
+
+      const handleSelectChunk = useCallback((index) => {
+        setActiveChunkIndex(index);
+        setChunk2DOrbit({ panX: 0, panY: 0, zoom: 1 });
+        setChunk2DHover(null);
+      }, []);
+
+      const handlePromoteChunkToSlice = useCallback((slice) => {
+        if (!slice) return;
+        setSliceState(prev => ({
+          ...prev,
+          pitch: slice.pitch ?? prev.pitch,
+          yaw: slice.yaw ?? prev.yaw,
+          roll: slice.roll ?? prev.roll,
+          apPosition: slice.apPosition ?? prev.apPosition,
+          lrPosition: slice.lrPosition ?? prev.lrPosition,
+          dvPosition: slice.dvPosition ?? prev.dvPosition,
+          thickness: THICKNESS_TO_MICRONS[slice.thickness] ?? prev.thickness,
+        }));
+        if (slice.thickness) setSelectedThickness(slice.thickness);
+        setSliceResult({
+          ...slice,
+          thickness: slice.thickness || selectedThickness,
+        });
+        setChunkMode(false);
+        setChunkResult(null);
+        setActiveChunkIndex(null);
+        setChunk2DOrbit({ panX: 0, panY: 0, zoom: 1 });
+        setChunk2DHover(null);
+        setSlice2DOrbit({ panX: 0, panY: 0, zoom: 1 });
+        setSlice2DHover(null);
+        rightPanelRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+      }, [selectedThickness]);
 
       // ---------------------------------------------------------------------------
       // Export handlers
@@ -2048,7 +2695,7 @@ useEffect(() => {
         if (!canvas || !sliceResult) return;
 
         const W = canvas.offsetWidth || 400;
-        const H = 300;
+        const H = Math.max(320, Math.round(canvas.getBoundingClientRect().height || 340));
         canvas.width  = W;
         canvas.height = H;
 
@@ -2061,91 +2708,62 @@ useEffect(() => {
         for (let x = 0; x < W; x += 50) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
         for (let y = 0; y < H; y += 50) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
 
-        if (!sliceResult.intersections || sliceResult.intersections.length === 0) {
+        const projection = getSliceProjection(sliceResult, visibilityState, slice2DOrbit, W, H);
+        const visibleIntersections = projection?.intersections || [];
+
+        canvas.userData = projection;
+
+        if (!visibleIntersections.length) {
           ctx.font = '11px "DM Mono", monospace';
           ctx.fillStyle = '#8A8078';
           ctx.textAlign = 'center';
-          ctx.fillText('No structures intersected', W / 2, H / 2);
+          ctx.fillText('No visible structures intersected', W / 2, H / 2);
           ctx.textAlign = 'left';
           return;
         }
 
-        const normal = sliceResult.plane.normal;
-        const up = Math.abs(normal.y) < 0.99 ? new THREE.Vector3(0,1,0) : new THREE.Vector3(1,0,0);
-        const uAxis = new THREE.Vector3().crossVectors(up, normal).normalize();
-        const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
-
-        let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
-        sliceResult.intersections.forEach(intersection => {
-          intersection.segments.forEach(seg => {
-            ['start','end'].forEach(key => {
-              const u =  seg[key].dot(uAxis);
-              const v = -seg[key].dot(vAxis);
-              if (u < uMin) uMin = u; if (u > uMax) uMax = u;
-              if (v < vMin) vMin = v; if (v > vMax) vMax = v;
-            });
-          });
-        });
-
-        const rangeU = uMax - uMin || 1;
-        const rangeV = vMax - vMin || 1;
-        const baseScale = Math.min((W * 0.8) / rangeU, (H * 0.8) / rangeV);
-        
-        const SCALE = baseScale * slice2DOrbit.zoom;
-        const uCenter = (uMin + uMax) / 2;
-        const vCenter = (vMin + vMax) / 2;
-        const cx = W / 2 - uCenter * SCALE + slice2DOrbit.panX;
-        const cy = H / 2 - vCenter * SCALE + slice2DOrbit.panY;
-
-        // Store projection info for click identification
-        canvas.userData = { 
-          baseScale, uCenter, vCenter, uAxis, vAxis, W, H,
-          SCALE, cx, cy // for backward compatibility/debugging
-        };
+        const { uAxis, vAxis, SCALE, cx, cy, vCenter } = projection;
 
         // Region fills
-        sliceResult.intersections.forEach(intersection => {
-          if (intersection.segments.length === 0) return;
-          const pts = [];
-          intersection.segments.forEach(seg => {
-            ['start','end'].forEach(key => {
-              pts.push({ 
-                u: seg[key].dot(uAxis) * SCALE + cx, 
-                v: H / 2 + ((-seg[key].dot(vAxis)) - vCenter) * SCALE + slice2DOrbit.panY
-              });
-            });
-          });
-          const centU = intersection.centroid.dot(uAxis)*SCALE+cx;
-          const centV = H / 2 + ((-intersection.centroid.dot(vAxis)) - vCenter) * SCALE + slice2DOrbit.panY;
-          pts.sort((a,b) => Math.atan2(a.v-centV, a.u-centU) - Math.atan2(b.v-centV, b.u-centU));
+        visibleIntersections.forEach(intersection => {
+          const pts = getIntersectionPolygonPoints(intersection, projection);
+          if (pts.length < 3) return;
           ctx.beginPath();
-          ctx.moveTo(pts[0].u, pts[0].v);
-          pts.slice(1).forEach(p => ctx.lineTo(p.u, p.v));
+          ctx.moveTo(pts[0].x, pts[0].y);
+          pts.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
           ctx.closePath();
           ctx.fillStyle = hexToRgba(intersection.color, 0.15);
           ctx.fill();
         });
 
+        const expressionSamples = (expressionOverlaySupported && expressionOverlay.enabled)
+          ? getExpressionSliceSamples(sliceResult, expressionOverlay, atlasVersion, pointInsideBrain)
+          : [];
+        const activeGeneMeta = expressionOverlay.activeGene ? EXPRESSION_OVERLAY_META[expressionOverlay.activeGene] : null;
+        if (expressionOverlaySupported && expressionOverlay.enabled && activeGeneMeta && expressionSamples.length) {
+          drawExpressionOverlay2D(ctx, expressionSamples, activeGeneMeta, visibleIntersections, projection);
+        }
+
         // Stroke segments
-        sliceResult.intersections.forEach(intersection => {
+        visibleIntersections.forEach(intersection => {
           ctx.strokeStyle = intersection.color;
           ctx.lineWidth = 2;
           ctx.lineCap = 'round';
           intersection.segments.forEach(seg => {
             ctx.beginPath();
-            ctx.moveTo(seg.start.dot(uAxis) * SCALE + cx, H / 2 + ((-seg.start.dot(vAxis)) - vCenter) * SCALE + slice2DOrbit.panY);
-            ctx.lineTo(seg.end.dot(uAxis)   * SCALE + cx, H / 2 + ((-seg.end.dot(vAxis))   - vCenter) * SCALE + slice2DOrbit.panY);
+            ctx.moveTo(seg.start.dot(uAxis) * SCALE + cx, (-seg.start.dot(vAxis)) * SCALE + cy);
+            ctx.lineTo(seg.end.dot(uAxis)   * SCALE + cx, (-seg.end.dot(vAxis))   * SCALE + cy);
             ctx.stroke();
           });
         });
 
         // Labels
         ctx.font = 'bold 11px "DM Mono", monospace';
-        const lb = sliceResult.intersections.map(ix => ({
+        const lb = visibleIntersections.map(ix => ({
           x: ix.centroid.dot(uAxis)*SCALE+cx,
-          y: H / 2 + ((-ix.centroid.dot(vAxis)) - vCenter) * SCALE + slice2DOrbit.panY,
+          y: (-ix.centroid.dot(vAxis)) * SCALE + cy,
           origX: ix.centroid.dot(uAxis)*SCALE+cx,
-          origY: H / 2 + ((-ix.centroid.dot(vAxis)) - vCenter) * SCALE + slice2DOrbit.panY,
+          origY: (-ix.centroid.dot(vAxis)) * SCALE + cy,
           text: ix.acronym, color: ix.color,
         }));
 
@@ -2185,8 +2803,25 @@ useEffect(() => {
         ctx.stroke();
         ctx.font = '9px "DM Mono", monospace'; ctx.fillStyle = '#8A8078';
         ctx.fillText('1 mm', barX+barPx/2-12, barY-4);
+
+        if (expressionOverlaySupported && expressionOverlay.enabled && activeGeneMeta) {
+          ctx.fillStyle = 'rgba(250,248,245,0.94)';
+          ctx.strokeStyle = '#DDD8CE';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          if (ctx.roundRect) ctx.roundRect(W - 172, 12, 160, 40, 5);
+          else ctx.rect(W - 172, 12, 160, 40);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = activeGeneMeta.color;
+          ctx.font = 'bold 10px "DM Mono", monospace';
+          ctx.fillText(activeGeneMeta.label, W - 160, 27);
+          ctx.fillStyle = '#8A8078';
+          ctx.font = '9px "DM Mono", monospace';
+          ctx.fillText('gene-expression overlay', W - 160, 41);
+        }
         ctx.restore();
-      }, [sliceResult, slice2DOrbit]);
+      }, [sliceResult, slice2DOrbit, visibilityState, expressionOverlay, atlasVersion, expressionOverlaySupported, pointInsideBrain]);
 
       const handle2DClick = useCallback((e) => {
         if (!sliceResult || !sliceCanvasRef.current) return;
@@ -2197,18 +2832,14 @@ useEffect(() => {
         const ud = canvas.userData;
         if (!ud || !ud.baseScale) return;
 
-        const { panX, panY, zoom } = slice2DOrbit;
-        const SCALE = ud.baseScale * zoom;
-        const cx = ud.W / 2 - ud.uCenter * SCALE + panX;
-
         // Reverse projection to find which structure was clicked
         // Identifies structure with centroid closest to click in current screen space
         let closest = null, minDist = 25; // 25px radius
-        sliceResult.intersections.forEach(ix => {
+        ud.intersections.forEach(ix => {
           const u = ix.centroid.dot(ud.uAxis);
           const v = -ix.centroid.dot(ud.vAxis);
-          const sx = u * SCALE + cx;
-          const sy = ud.H / 2 + (v - ud.vCenter) * SCALE + panY;
+          const sx = u * ud.SCALE + ud.cx;
+          const sy = v * ud.SCALE + ud.cy;
           const dist = Math.sqrt((sx - ex)**2 + (sy - ey)**2);
           if (dist < minDist) {
             minDist = dist;
@@ -2223,11 +2854,207 @@ useEffect(() => {
         } else {
           setSlice2DHover(null);
         }
-      }, [sliceResult, slice2DOrbit]);
+      }, [sliceResult]);
+
+      const handleChunk2DPointerDown = useCallback((e) => {
+        chunk2DRef.current.isDown = true;
+        chunk2DRef.current.lastX = e.clientX;
+        chunk2DRef.current.lastY = e.clientY;
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }, []);
+
+      const handleChunk2DPointerMove = useCallback((e) => {
+        if (!chunk2DRef.current.isDown) return;
+        const dx = e.clientX - chunk2DRef.current.lastX;
+        const dy = e.clientY - chunk2DRef.current.lastY;
+        chunk2DRef.current.lastX = e.clientX;
+        chunk2DRef.current.lastY = e.clientY;
+        setChunk2DOrbit(prev => ({ ...prev, panX: prev.panX + dx, panY: prev.panY + dy }));
+      }, []);
+
+      const handleChunk2DPointerUp = useCallback((e) => {
+        chunk2DRef.current.isDown = false;
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }, []);
+
+      const handleChunk2DWheel = useCallback((e) => {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        setChunk2DOrbit(prev => ({ ...prev, zoom: Math.max(0.1, Math.min(10, prev.zoom * delta)) }));
+      }, []);
+
+      const renderChunk2D = useCallback(() => {
+        const THREE = window.THREE;
+        if (!THREE) return;
+        const canvas = chunkCanvasRef.current;
+        if (!canvas || !activeChunkSlice) return;
+
+        const W = canvas.offsetWidth || 400;
+        const H = Math.max(340, Math.round(canvas.getBoundingClientRect().height || 340));
+        canvas.width = W;
+        canvas.height = H;
+
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#FAF8F5';
+        ctx.fillRect(0, 0, W, H);
+        ctx.strokeStyle = '#E8E4DC';
+        ctx.lineWidth = 0.5;
+        for (let x = 0; x < W; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+        for (let y = 0; y < H; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+        const projection = getSliceProjection(activeChunkSlice, visibilityState, chunk2DOrbit, W, H);
+        const visibleIntersections = projection?.intersections || [];
+        canvas.userData = projection;
+
+        if (!visibleIntersections.length) {
+          ctx.font = '11px "DM Mono", monospace';
+          ctx.fillStyle = '#8A8078';
+          ctx.textAlign = 'center';
+          ctx.fillText('No visible structures intersected', W / 2, H / 2);
+          ctx.textAlign = 'left';
+          return;
+        }
+
+        const { uAxis, vAxis, SCALE, cx, cy } = projection;
+        visibleIntersections.forEach(intersection => {
+          const pts = getIntersectionPolygonPoints(intersection, projection);
+          if (pts.length < 3) return;
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x, pts[0].y);
+          pts.slice(1).forEach(point => ctx.lineTo(point.x, point.y));
+          ctx.closePath();
+          ctx.fillStyle = hexToRgba(intersection.color, 0.15);
+          ctx.fill();
+        });
+
+        const expressionSamples = (expressionOverlaySupported && expressionOverlay.enabled)
+          ? getExpressionSliceSamples(activeChunkSlice, expressionOverlay, atlasVersion, pointInsideBrain)
+          : [];
+        const activeGeneMeta = expressionOverlay.activeGene ? EXPRESSION_OVERLAY_META[expressionOverlay.activeGene] : null;
+        if (expressionOverlaySupported && expressionOverlay.enabled && activeGeneMeta && expressionSamples.length) {
+          drawExpressionOverlay2D(ctx, expressionSamples, activeGeneMeta, visibleIntersections, projection);
+        }
+
+        visibleIntersections.forEach(intersection => {
+          ctx.strokeStyle = intersection.color;
+          ctx.lineWidth = 2;
+          ctx.lineCap = 'round';
+          intersection.segments.forEach(seg => {
+            ctx.beginPath();
+            ctx.moveTo(seg.start.dot(uAxis) * SCALE + cx, (-seg.start.dot(vAxis)) * SCALE + cy);
+            ctx.lineTo(seg.end.dot(uAxis) * SCALE + cx, (-seg.end.dot(vAxis)) * SCALE + cy);
+            ctx.stroke();
+          });
+        });
+
+        ctx.font = 'bold 11px "DM Mono", monospace';
+        const labels = visibleIntersections.map(ix => ({
+          x: ix.centroid.dot(uAxis) * SCALE + cx,
+          y: (-ix.centroid.dot(vAxis)) * SCALE + cy,
+          text: ix.acronym,
+          color: ix.color,
+        }));
+
+        const LABEL_MIN_DIST = 20;
+        for (let iter = 0; iter < 3; iter++) {
+          for (let i = 0; i < labels.length; i++) {
+            for (let j = i + 1; j < labels.length; j++) {
+              const dx = labels[j].x - labels[i].x;
+              const dy = labels[j].y - labels[i].y;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              if (dist < LABEL_MIN_DIST && dist > 0) {
+                const push = (LABEL_MIN_DIST - dist) / 2;
+                labels[i].x -= (dx / dist) * push;
+                labels[i].y -= (dy / dist) * push;
+                labels[j].x += (dx / dist) * push;
+                labels[j].y += (dy / dist) * push;
+              }
+            }
+          }
+        }
+
+        labels.forEach(label => {
+          const metrics = ctx.measureText(label.text);
+          ctx.fillStyle = 'rgba(250,248,245,0.92)';
+          ctx.beginPath();
+          if (ctx.roundRect) ctx.roundRect(label.x - 3, label.y - 11, metrics.width + 6, 15, 3);
+          else ctx.rect(label.x - 3, label.y - 11, metrics.width + 6, 15);
+          ctx.fill();
+          ctx.fillStyle = label.color;
+          ctx.fillText(label.text, label.x, label.y);
+        });
+
+        const barPx = 1000 * SCALE;
+        const barX = 12;
+        const barY = H - 14;
+        ctx.save();
+        ctx.strokeStyle = '#8A8078';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(barX, barY);
+        ctx.lineTo(barX + barPx, barY);
+        ctx.stroke();
+        ctx.font = '9px "DM Mono", monospace';
+        ctx.fillStyle = '#8A8078';
+        ctx.fillText('1 mm', barX + barPx / 2 - 12, barY - 4);
+
+        if (expressionOverlaySupported && expressionOverlay.enabled && activeGeneMeta) {
+          ctx.fillStyle = 'rgba(250,248,245,0.94)';
+          ctx.strokeStyle = '#DDD8CE';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          if (ctx.roundRect) ctx.roundRect(W - 172, 12, 160, 40, 5);
+          else ctx.rect(W - 172, 12, 160, 40);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = activeGeneMeta.color;
+          ctx.font = 'bold 10px "DM Mono", monospace';
+          ctx.fillText(activeGeneMeta.label, W - 160, 27);
+          ctx.fillStyle = '#8A8078';
+          ctx.font = '9px "DM Mono", monospace';
+          ctx.fillText('gene-expression overlay', W - 160, 41);
+        }
+        ctx.restore();
+      }, [activeChunkSlice, chunk2DOrbit, visibilityState, expressionOverlay, atlasVersion, expressionOverlaySupported, pointInsideBrain]);
+
+      const handleChunk2DClick = useCallback((e) => {
+        if (!activeChunkSlice || !chunkCanvasRef.current) return;
+        const canvas = chunkCanvasRef.current;
+        const rect = canvas.getBoundingClientRect();
+        const ex = e.clientX - rect.left;
+        const ey = e.clientY - rect.top;
+        const ud = canvas.userData;
+        if (!ud?.intersections?.length) return;
+
+        let closest = null;
+        let minDist = 25;
+        ud.intersections.forEach(ix => {
+          const u = ix.centroid.dot(ud.uAxis);
+          const v = -ix.centroid.dot(ud.vAxis);
+          const sx = u * ud.SCALE + ud.cx;
+          const sy = v * ud.SCALE + ud.cy;
+          const dist = Math.sqrt((sx - ex) ** 2 + (sy - ey) ** 2);
+          if (dist < minDist) {
+            minDist = dist;
+            closest = ix;
+          }
+        });
+
+        if (closest) {
+          setChunk2DHover({ acronym: closest.acronym, name: closest.name, group: closest.group });
+          setHighlightState(prev => ({ ...prev, highlighted: [closest.acronym] }));
+        } else {
+          setChunk2DHover(null);
+        }
+      }, [activeChunkSlice]);
 
       useEffect(() => {
         if (sliceResult) renderSlice2D();
       }, [sliceResult, renderSlice2D]);
+
+      useEffect(() => {
+        if (activeChunkSlice) renderChunk2D();
+      }, [activeChunkSlice, renderChunk2D]);
 
       // ---------------------------------------------------------------------------
       // Render
@@ -2236,7 +3063,7 @@ useEffect(() => {
         <>
           {/* Root container — full viewport */}
           <div style={{
-            display: 'flex', width: '100vw', height: '100vh',
+            display: 'flex', width: '100%', height: '100dvh', minHeight: '100dvh',
             overflow: 'hidden', background: T.bg, fontFamily: T.fontMono,
           }}>
 
@@ -2247,10 +3074,11 @@ useEffect(() => {
               flex: `0 0 ${leftWidth}%`,
               display: 'grid',
               gridTemplateAreas: '". top ." "left canvas right" ". bottom ."',
-              gridTemplateColumns: '56px 1fr 56px',
-              gridTemplateRows: '56px 1fr 56px',
+              gridTemplateColumns: 'clamp(40px, 4vw, 56px) minmax(0, 1fr) clamp(40px, 4vw, 56px)',
+              gridTemplateRows: 'clamp(40px, 6vh, 56px) minmax(0, 1fr) clamp(40px, 6vh, 56px)',
               background: '#FAF8F5',
               position: 'relative',
+              minHeight: 0,
             }}>
 
               {/* ---- Top slider: ROSTRAL ← → CAUDAL (Anterior-Posterior) ---- */}
@@ -2319,7 +3147,7 @@ useEffect(() => {
                 ref={mountRef}
                 style={{
                   gridArea: 'canvas', position: 'relative',
-                  overflow: 'hidden', cursor: 'grab',
+                  overflow: 'hidden', cursor: 'grab', minHeight: 0,
                 }}
                 onMouseMove={handleMouseMove}
                 onMouseLeave={() => setTooltip(null)}
@@ -2414,6 +3242,8 @@ useEffect(() => {
                     fontFamily: T.fontMono, fontSize: 11, color: T.text,
                     zIndex: 10, boxShadow: '0 2px 8px rgba(0,0,0,0.08)', userSelect: 'none',
                   }}
+                  data-ui-overlay="true"
+                  onPointerDown={stopOverlayPointer}
                 >
                   {/* Drag handle — only part that initiates movement */}
                   <div 
@@ -2453,6 +3283,7 @@ useEffect(() => {
                         <div key={groupName} style={{ marginBottom: 4 }} onMouseDown={e => e.stopPropagation()}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 5, paddingBottom: 2 }}>
                             <input type="checkbox" checked={groupChecked}
+                                   ref={node => { groupCheckboxRefs.current[groupName] = node; }}
                                    onMouseDown={e => e.stopPropagation()}
                                    onChange={e => { handleToggleGroup(groupName, e.target.checked); }}
                                    style={{ cursor: 'pointer', accentColor: T.accent, margin: 0 }} />
@@ -2575,6 +3406,7 @@ useEffect(() => {
             {/* ---- Vertical Resize Divider ---- */}
             <div 
               onMouseDown={onResizeMouseDown}
+              onDoubleClick={() => setLeftWidth(getPanelWidthBounds(window.innerWidth).max)}
               style={{
                 width: 4, cursor: 'col-resize', background: '#E8E4DC',
                 flexShrink: 0, position: 'relative', zIndex: 100,
@@ -2595,7 +3427,7 @@ useEffect(() => {
             <div style={{
               flex: `1 1 ${100 - leftWidth}%`, display: 'flex', flexDirection: 'column',
               borderLeft: `1px solid ${T.border}`, background: T.panelBg,
-              overflow: 'hidden',
+              overflow: 'hidden', minHeight: 0,
             }}>
 
               {/* ---- Controls Panel (top half, scrollable) ---- */}
@@ -2820,11 +3652,230 @@ useEffect(() => {
                   </div>
                 </div>
 
+                {/* Molecular overlay */}
+                <div style={{
+                  marginTop: 22,
+                  padding: 14,
+                  borderRadius: 8,
+                  border: `1px solid ${T.border}`,
+                  background: 'linear-gradient(180deg, rgba(244,240,232,0.92) 0%, rgba(250,248,245,0.96) 100%)',
+                }}>
+                  <div style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    gap: 10, marginBottom: 8,
+                  }}>
+                    <div>
+                      <div style={{
+                        fontFamily: T.fontMono, fontSize: 10, letterSpacing: '0.1em',
+                        color: T.textMuted, textTransform: 'uppercase', marginBottom: 4,
+                      }}>
+                        Developmental Overlay
+                      </div>
+                      <div style={{ fontFamily: T.fontSerif, fontSize: 16, color: T.text, lineHeight: 1.1 }}>
+                        Developmental Expression Reference
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                      <div style={{
+                        fontFamily: T.fontMono, fontSize: 9, color: T.textMuted,
+                        padding: '5px 8px', borderRadius: 999, border: `1px solid ${T.border}`,
+                        background: '#FAF8F5',
+                      }}>
+                        {expressionOverlay.status === 'ready' ? expressionSourceLabel : expressionOverlay.status}
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={expressionOverlay.enabled ? 'true' : 'false'}
+                    aria-label="Show developmental expression reference"
+                    disabled={!canToggleGradients}
+                    onClick={handleToggleGradients}
+                    style={{
+                      width: '100%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 12,
+                      marginBottom: 12,
+                      padding: '10px 12px',
+                      borderRadius: 8,
+                      border: `1px solid ${expressionOverlay.enabled ? T.accent : T.border}`,
+                      background: expressionOverlay.enabled ? '#F0F5EF' : '#FAF8F5',
+                      cursor: canToggleGradients ? 'pointer' : 'not-allowed',
+                      opacity: canToggleGradients ? 1 : 0.55,
+                      textAlign: 'left',
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontFamily: T.fontMono, fontSize: 10, color: T.text, marginBottom: 3 }}>
+                        Show Developmental Expression Reference
+                      </div>
+                      <div style={{ fontFamily: T.fontMono, fontSize: 9, color: T.textMuted, lineHeight: 1.45 }}>
+                        Toggle the sampled developmental marker layer on or off without changing the pulled voxel mapping.
+                      </div>
+                      {expressionOverlay.status === 'ready' && (
+                        <div style={{ fontFamily: T.fontMono, fontSize: 9, color: T.textMuted, lineHeight: 1.45, marginTop: 5 }}>
+                          Loaded {expressionOverlayStats.geneCount} markers / {formatCount(expressionOverlayStats.totalSamples)} sampled voxels from {expressionSourceLabel}.
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+                      <span style={{ fontFamily: T.fontMono, fontSize: 10, color: expressionOverlay.enabled ? T.accent : T.textMuted }}>
+                        {expressionOverlay.enabled ? 'On' : 'Off'}
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          width: 44,
+                          height: 24,
+                          borderRadius: 999,
+                          border: 'none',
+                          padding: 2,
+                          background: expressionOverlay.enabled ? T.accent : '#D7D0C5',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: expressionOverlay.enabled ? 'flex-end' : 'flex-start',
+                        }}
+                      >
+                        <span style={{
+                          width: 20,
+                          height: 20,
+                          borderRadius: 999,
+                          background: '#FAF8F5',
+                          boxShadow: '0 1px 2px rgba(0,0,0,0.12)',
+                          display: 'block',
+                        }} />
+                      </span>
+                    </div>
+                  </button>
+
+                  <div style={{
+                      fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
+                      marginBottom: 10, lineHeight: 1.5,
+                    }}>
+                    Reference-only developmental expression layer for the three markers we discussed, shown as slice-associated sampled stain rather than inferred anatomy or volumetric haze.
+                  </div>
+
+                  {!expressionOverlaySupported && (
+                    <div style={{
+                      marginBottom: 12,
+                      padding: '10px 12px',
+                      borderRadius: 6,
+                      background: '#FAF8F5',
+                      border: `1px solid ${T.border}`,
+                      fontFamily: T.fontMono,
+                      fontSize: 9,
+                      color: T.textMuted,
+                      lineHeight: 1.5,
+                    }}>
+                      Developmental expression reference is shown only in <strong>P4 Developmental</strong> mode. The current local marker set is developmental and should not be projected onto the adult atlas as if it were age-matched.
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+                    {Object.entries(EXPRESSION_OVERLAY_META).map(([gene, meta]) => {
+                      const active = expressionOverlay.activeGene === gene;
+                      return (
+                        <button
+                          key={gene}
+                          disabled={expressionOverlay.status !== 'ready' || !expressionOverlaySupported || !expressionOverlay.enabled}
+                          onClick={() => setExpressionOverlay(prev => ({
+                            ...prev,
+                            activeGene: gene,
+                          }))}
+                          style={{
+                            padding: '7px 10px',
+                            borderRadius: 999,
+                            border: `1px solid ${active ? meta.color : T.border}`,
+                            background: active ? hexToRgba(meta.color, 0.12) : '#FAF8F5',
+                            color: active ? meta.color : T.text,
+                            cursor: expressionOverlay.status === 'ready' && expressionOverlaySupported && expressionOverlay.enabled ? 'pointer' : 'not-allowed',
+                            opacity: expressionOverlay.status === 'ready' && expressionOverlaySupported && expressionOverlay.enabled ? 1 : 0.55,
+                            fontFamily: T.fontMono,
+                            fontSize: 10,
+                            textAlign: 'left',
+                          }}
+                        >
+                          {meta.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {expressionOverlaySupported && expressionOverlay.enabled && expressionOverlay.activeGene && EXPRESSION_OVERLAY_META[expressionOverlay.activeGene] && (
+                    <div style={{
+                      marginBottom: 12,
+                      padding: '10px 12px',
+                      borderRadius: 6,
+                      background: '#FAF8F5',
+                      border: `1px solid ${T.border}`,
+                    }}>
+                      <div style={{
+                        fontFamily: T.fontMono, fontSize: 10, color: EXPRESSION_OVERLAY_META[expressionOverlay.activeGene].color,
+                        marginBottom: 4, fontWeight: 600,
+                      }}>
+                        {EXPRESSION_OVERLAY_META[expressionOverlay.activeGene].label} · {EXPRESSION_OVERLAY_META[expressionOverlay.activeGene].circuit}
+                      </div>
+                      <div style={{ fontFamily: T.fontMono, fontSize: 9, color: T.textMuted, lineHeight: 1.45 }}>
+                        {EXPRESSION_OVERLAY_META[expressionOverlay.activeGene].note}
+                      </div>
+                      {expressionOverlay.ranges?.[expressionOverlay.activeGene] && (
+                        <div style={{ fontFamily: T.fontMono, fontSize: 9, color: T.textMuted, lineHeight: 1.45, marginTop: 6 }}>
+                          Trust metadata: marker {EXPRESSION_OVERLAY_META[expressionOverlay.activeGene].label}
+                          {' '}· source {expressionSourceLabel}
+                          {' '}· spacing {EXPRESSION_SAMPLE_SPACING_MICRONS} µm
+                          {' '}· slice inclusion window ±{Math.round(expressionSliceWindowMicrons)} µm
+                          {' '}· active samples {formatCount(activeExpressionSamples.length)}
+                        </div>
+                      )}
+                      {expressionOverlay.ranges?.[expressionOverlay.activeGene] && (
+                        <div style={{ fontFamily: T.fontMono, fontSize: 9, color: T.textMuted, lineHeight: 1.45, marginTop: 6 }}>
+                          Normalization: within-marker 5th-95th percentile visibility from {formatExpressionValue(expressionOverlay.ranges[expressionOverlay.activeGene].p05 ?? expressionOverlay.ranges[expressionOverlay.activeGene].min)}
+                          {' '}to{' '}
+                          {formatExpressionValue(expressionOverlay.ranges[expressionOverlay.activeGene].p95 ?? expressionOverlay.ranges[expressionOverlay.activeGene].max)}
+                          {' '}a.u.; one rendered mark per sampled voxel and low-end signal fades toward transparent.
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div>
+                    <div style={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      fontFamily: T.fontMono, fontSize: 9, color: T.textMuted, marginBottom: 4,
+                    }}>
+                      <span>REFERENCE VISIBILITY</span>
+                      <span style={{ color: T.accent }}>{Math.round(expressionOverlay.opacity * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      className="frame-slider"
+                      min={0.2}
+                      max={1}
+                      step={0.05}
+                      value={expressionOverlay.opacity}
+                      disabled={expressionOverlay.status !== 'ready' || !expressionOverlaySupported || !expressionOverlay.enabled}
+                      onChange={e => setExpressionOverlay(prev => ({ ...prev, opacity: Number(e.target.value) }))}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+                </div>
+
                 {/* ---- CHUNK MODE ---- */}
                 <div style={{ marginTop: 22, border: `1px solid ${T.border}`, borderRadius: 6, overflow: 'hidden' }}>
                   {/* Header toggle */}
                   <div
-                    onClick={() => { setChunkMode(v => !v); if (chunkMode) setChunkResult(null); }}
+                    onClick={() => {
+                      setChunkMode(v => !v);
+                      if (chunkMode) {
+                        setChunkResult(null);
+                        setActiveChunkIndex(null);
+                        setChunk2DHover(null);
+                      }
+                    }}
                     style={{
                       display:'flex', alignItems:'center', justifyContent:'space-between',
                       padding:'8px 12px', cursor:'pointer',
@@ -2880,12 +3931,171 @@ useEffect(() => {
 
                       {chunkResult && (
                         <div style={{ marginTop:12 }}>
+                          <div style={{
+                            marginBottom: 10,
+                            padding: '10px 12px',
+                            borderRadius: 8,
+                            border: `1px solid ${T.border}`,
+                            background: '#F7F4EE',
+                          }}>
+                            <div style={{
+                              fontFamily: T.fontMono, fontSize: 9, color: T.textMuted,
+                              letterSpacing: '0.08em', marginBottom: 6,
+                            }}>
+                              CHUNK STACK
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+                              {[
+                                ['Axial', chunkResult[0].pitch, '°'],
+                                ['Top', chunkResult[0].yaw, '°'],
+                                ['Side', chunkResult[0].roll, '°'],
+                                ['Thick', chunkResult[0].thickness, ''],
+                                ['Span', `${((chunkResult.length - 1) * chunkSpacing / 1000).toFixed(1)}mm`, ''],
+                              ].map(([k, v, u]) => (
+                                <span key={k} style={{
+                                  fontFamily: T.fontMono, fontSize: 10,
+                                  background: '#F0EDE6', border: `1px solid ${T.border}`,
+                                  color: '#5A5450', borderRadius: 10, padding: '2px 7px',
+                                }}>
+                                  {k} {v}{u}
+                                </span>
+                              ))}
+                            </div>
+                            {activeChunkSlice && (
+                              <div style={{ fontFamily: T.fontMono, fontSize: 9, color: T.textMuted, lineHeight: 1.5 }}>
+                                Focused slice: offset {formatSignedValue(activeChunkSlice.offset, 'µm')} ·
+                                AP {formatSignedValue(activeChunkSlice.apPosition, 'µm')} ·
+                                LR {formatSignedValue(activeChunkSlice.lrPosition, 'µm')} ·
+                                DV {formatSignedValue(activeChunkSlice.dvPosition, 'µm')}
+                              </div>
+                            )}
+                          </div>
+
                           <div style={{ fontFamily:T.fontMono, fontSize:9, color:T.textMuted, marginBottom:6 }}>
-                            FILMSTRIP — {chunkResult.length} slices × {chunkSpacing}µm
+                            FILMSTRIP — click a slice to inspect it below
                           </div>
                           <div style={{ display:'flex', gap:5, overflowX:'auto', paddingBottom:4 }}>
                             {chunkResult.map((slice,i) => (
-                              <ChunkSliceThumb key={i} slice={slice} index={i} total={chunkResult.length} />
+                              <ChunkSliceThumb
+                                key={i}
+                                slice={slice}
+                                index={i}
+                                total={chunkResult.length}
+                                isSelected={activeChunkIndex === i}
+                                visibilityState={visibilityState}
+                                onClick={() => handleSelectChunk(i)}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {activeChunkSlice && (
+                        <div style={{
+                          marginTop: 14,
+                          padding: 12,
+                          borderRadius: 8,
+                          border: `1px solid ${T.border}`,
+                          background: '#FAF8F5',
+                        }}>
+                          <div style={{
+                            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                            gap: 10, marginBottom: 8, flexWrap: 'wrap',
+                          }}>
+                            <div>
+                              <div style={{ fontFamily: T.fontMono, fontSize: 9, letterSpacing: '0.08em', color: T.textMuted }}>
+                                FOCUSED CHUNK
+                              </div>
+                              <div style={{ fontFamily: T.fontSerif, fontSize: 16, color: T.text }}>
+                                Offset {activeChunkSlice.offset >= 0 ? '+' : ''}{activeChunkSlice.offset}µm
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => handlePromoteChunkToSlice(activeChunkSlice)}
+                              style={{
+                                border: `1px solid ${T.accent}`,
+                                background: '#F0F5EF',
+                                color: T.accent,
+                                borderRadius: 999,
+                                padding: '6px 10px',
+                                fontFamily: T.fontMono,
+                                fontSize: 10,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              Open as main slice
+                            </button>
+                          </div>
+
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                            {[
+                              ['Axial', activeChunkSlice.pitch, '°'],
+                              ['Top', activeChunkSlice.yaw, '°'],
+                              ['Side', activeChunkSlice.roll, '°'],
+                              ['Thick', activeChunkSlice.thickness, ''],
+                              ['AP', formatSignedValue(activeChunkSlice.apPosition, 'µm'), ''],
+                              ['LR', formatSignedValue(activeChunkSlice.lrPosition, 'µm'), ''],
+                              ['DV', formatSignedValue(activeChunkSlice.dvPosition, 'µm'), ''],
+                            ].map(([k, v, u]) => (
+                              <span key={k} style={{
+                                fontFamily: T.fontMono, fontSize: 10,
+                                background: '#F0EDE6', border: `1px solid ${T.border}`,
+                                color: '#5A5450', borderRadius: 10, padding: '2px 7px',
+                              }}>
+                                {k} {v}{u}
+                              </span>
+                            ))}
+                          </div>
+
+                          {chunk2DHover && (
+                            <div style={{
+                              marginBottom: 8, padding: '4px 8px', background: '#F0EDE6',
+                              borderRadius: 4, border: `1px solid ${T.border}`,
+                              fontFamily: T.fontMono, fontSize: 10, color: T.text,
+                              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                            }}>
+                              <span><strong>{chunk2DHover.acronym}</strong>: {chunk2DHover.name}</span>
+                              <button
+                                onClick={() => setChunk2DHover(null)}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.textMuted, fontSize: 12 }}
+                              >✕</button>
+                            </div>
+                          )}
+
+                          <canvas
+                            ref={chunkCanvasRef}
+                            onPointerDown={handleChunk2DPointerDown}
+                            onPointerMove={handleChunk2DPointerMove}
+                            onPointerUp={handleChunk2DPointerUp}
+                            onWheel={handleChunk2DWheel}
+                            onClick={handleChunk2DClick}
+                            style={{
+                              width: '100%', height: 'clamp(360px, 44vh, 620px)', display: 'block',
+                              borderRadius: 4, border: `1px solid ${T.border}`,
+                              marginBottom: 10, background: '#FAF8F5',
+                              cursor: 'crosshair', touchAction: 'none',
+                            }}
+                          />
+
+                          <div style={{
+                            fontFamily: T.fontMono, fontSize: 9, color: T.textMuted,
+                            marginBottom: 6, letterSpacing: '0.08em',
+                          }}>
+                            VISIBLE STRUCTURES ({getVisibleIntersections(activeChunkSlice, visibilityState).length})
+                          </div>
+                          <div style={{ maxHeight: 150, overflowY: 'auto' }}>
+                            {getVisibleIntersections(activeChunkSlice, visibilityState).map(ix => (
+                              <div key={`${activeChunkSlice.index}-${ix.acronym}`} style={{
+                                display: 'flex', alignItems: 'center', gap: 8,
+                                padding: '4px 6px', borderRadius: 4,
+                                background: chunk2DHover?.acronym === ix.acronym ? hexToRgba(ix.color, 0.08) : 'transparent',
+                              }}>
+                                <div style={{ width: 9, height: 9, borderRadius: 999, background: ix.color, flexShrink: 0 }} />
+                                <span style={{ fontFamily: T.fontMono, fontSize: 10, color: ix.color, minWidth: 40 }}>{ix.acronym}</span>
+                                <span style={{ fontFamily: T.fontMono, fontSize: 10, color: T.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {ix.name}
+                                </span>
+                              </div>
                             ))}
                           </div>
                         </div>
@@ -3022,7 +4232,7 @@ useEffect(() => {
                       onWheel={handle2DWheel}
                       onClick={handle2DClick}
                       style={{
-                        width: '100%', height: '300px', display: 'block',
+                        width: '100%', height: 'clamp(360px, 42vh, 620px)', display: 'block',
                         borderRadius: 4, border: `1px solid ${T.border}`,
                         marginBottom: 12, background: '#FAF8F5',
                         cursor: 'crosshair', touchAction: 'none'
@@ -3031,16 +4241,16 @@ useEffect(() => {
 
                     {/* Structure list */}
                     <div style={{ fontFamily: T.fontMono, fontSize: 10, letterSpacing: '0.1em', color: T.textMuted, marginTop: 12, marginBottom: 6 }}>
-                      INTERSECTED STRUCTURES ({sliceResult.intersections.length})
+                      INTERSECTED STRUCTURES ({getVisibleIntersections(sliceResult, visibilityState).length})
                     </div>
 
-                    {sliceResult.intersections.length === 0 ? (
+                    {getVisibleIntersections(sliceResult, visibilityState).length === 0 ? (
                       <div style={{ fontFamily: T.fontMono, fontSize: 11, color: T.textMuted, textAlign: 'center', padding: '16px 0' }}>
                         No structures at this plane position.<br/>Try adjusting A→P position, axial spin, or side angle.
                       </div>
                     ) : (
                       <div style={{ overflowY: 'auto', flex: 1 }}>
-                        {sliceResult.intersections.map(ix => {
+                        {getVisibleIntersections(sliceResult, visibilityState).map(ix => {
                           const isHighlighted = highlightState.highlighted.includes(ix.acronym);
                           const groupColor    = GROUP_COLORS[ix.group] || '#888';
                           return (
@@ -3281,11 +4491,9 @@ useEffect(() => {
     }
 
     // Mount the component
-    console.log('Mounting AllenAtlasSlicePlanner...');
     try {
       const root = ReactDOM.createRoot(document.getElementById('root'));
       root.render(<AllenAtlasSlicePlanner />);
-      console.log('Render called.');
     } catch (e) {
       console.error('Mounting failed:', e);
     }
