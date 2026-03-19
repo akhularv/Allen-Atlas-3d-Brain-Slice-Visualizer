@@ -401,6 +401,30 @@
       { id:1002, acronym:'AUDp',    label:'Primary auditory area',
         color:'#48C9B0', group:'cortex',
         center_ccf:[5000,2500,3200], semi_axes:[650,500,550], euler_ccf:[0,0,0] },
+      { id:254,  acronym:'RSP',     label:'Retrosplenial area',
+        color:'#00BCD4', group:'cortex',
+        center_ccf:[7200,1600,5700], semi_axes:[1100,700,800], euler_ccf:[0,0,0] },
+      { id:31,   acronym:'ACA',     label:'Anterior cingulate area',
+        color:'#26C6DA', group:'cortex',
+        center_ccf:[1400,2100,5700], semi_axes:[600,500,500], euler_ccf:[0,0,0] },
+      { id:972,  acronym:'PL',      label:'Prelimbic area',
+        color:'#4DB6AC', group:'cortex',
+        center_ccf:[1800,2700,5700], semi_axes:[380,380,280], euler_ccf:[0,0,0] },
+      { id:44,   acronym:'ILA',     label:'Infralimbic area',
+        color:'#26A69A', group:'cortex',
+        center_ccf:[2100,3100,5700], semi_axes:[280,340,240], euler_ccf:[0,0,0] },
+      { id:723,  acronym:'ORBm',    label:'Orbital area',
+        color:'#66BB6A', group:'cortex',
+        center_ccf:[2300,2400,5400], semi_axes:[600,460,460], euler_ccf:[0,0,0] },
+      { id:95,   acronym:'AI',      label:'Agranular insular area',
+        color:'#81C784', group:'cortex',
+        center_ccf:[2800,2400,3600], semi_axes:[700,600,380], euler_ccf:[0,0,0] },
+      { id:541,  acronym:'TEa',     label:'Temporal association area',
+        color:'#A5D6A7', group:'cortex',
+        center_ccf:[6400,3000,3000], semi_axes:[900,600,500], euler_ccf:[0,0,0] },
+      { id:451,  acronym:'ECT',     label:'Ectorhinal area',
+        color:'#C8E6C9', group:'cortex',
+        center_ccf:[7800,3600,3800], semi_axes:[650,450,420], euler_ccf:[0,0,0] },
 
       // ---- FIBER TRACTS -------------------------------------------------------
       { id:776,  acronym:'ic',      label:'Internal capsule',
@@ -681,6 +705,59 @@
     });
 
     // ---------------------------------------------------------------------------
+    // ChunkSliceThumb — thumbnail canvas for one slice in the filmstrip
+    // ---------------------------------------------------------------------------
+    function ChunkSliceThumb({ slice, index, total }) {
+      const canvasRef = React.useRef(null);
+      React.useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas || !slice || !slice.plane || !slice.intersections) return;
+        const THREE = window.THREE;
+        if (!THREE) return;
+        const W = 90, H = 70;
+        canvas.width = W; canvas.height = H;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#FAF8F5'; ctx.fillRect(0, 0, W, H);
+        const normal = slice.plane.normal;
+        const up = Math.abs(normal.y) < 0.99 ? new THREE.Vector3(0,1,0) : new THREE.Vector3(1,0,0);
+        const uAxis = new THREE.Vector3().crossVectors(up, normal).normalize();
+        const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
+        let uMin=Infinity,uMax=-Infinity,vMin=Infinity,vMax=-Infinity;
+        slice.intersections.forEach(ix => ix.segments.forEach(seg => {
+          ['start','end'].forEach(k => {
+            const u=seg[k].dot(uAxis), v=-seg[k].dot(vAxis);
+            if(u<uMin)uMin=u; if(u>uMax)uMax=u; if(v<vMin)vMin=v; if(v>vMax)vMax=v;
+          });
+        }));
+        if (!isFinite(uMin)) return;
+        const sc = Math.min(W*0.8/(uMax-uMin+1), H*0.8/(vMax-vMin+1));
+        const cx = W/2-((uMin+uMax)/2)*sc, cy = H/2+((vMin+vMax)/2)*sc;
+        slice.intersections.forEach(ix => {
+          ctx.strokeStyle=ix.color; ctx.lineWidth=1;
+          ix.segments.forEach(s => {
+            ctx.beginPath();
+            ctx.moveTo(s.start.dot(uAxis)*sc+cx, -s.start.dot(vAxis)*sc+cy);
+            ctx.lineTo(s.end.dot(uAxis)*sc+cx,   -s.end.dot(vAxis)*sc+cy);
+            ctx.stroke();
+          });
+        });
+      }, [slice]);
+      const isCenter = index === Math.floor(total/2);
+      const lbl = slice.offset>=0 ? `+${slice.offset}` : `${slice.offset}`;
+      return (
+        <div style={{ flexShrink:0, display:'flex', flexDirection:'column', alignItems:'center' }}>
+          <canvas ref={canvasRef} width={90} height={70} style={{
+            border: isCenter ? '2px solid #4A6741' : '1px solid #DDD8CE',
+            borderRadius: 3, display:'block',
+          }} />
+          <div style={{ fontSize:8, color:'#8A8078', fontFamily:'"DM Mono",monospace', marginTop:2 }}>
+            {lbl}µm
+          </div>
+        </div>
+      );
+    }
+
+    // ---------------------------------------------------------------------------
     // Main Component
     // ---------------------------------------------------------------------------
     function AllenAtlasSlicePlanner() {
@@ -734,6 +811,16 @@
       const [importMsg,            setImportMsg]            = useState('');
       const [savedSlicesPanelOpen, setSavedSlicesPanelOpen] = useState(true);
       const [webglError,           setWebglError]           = useState(false);
+
+      // Chunk mode state
+      const [chunkMode,    setChunkMode]    = useState(false);
+      const [chunkCount,   setChunkCount]   = useState(7);
+      const [chunkSpacing, setChunkSpacing] = useState(300);
+      const [chunkResult,  setChunkResult]  = useState(null);
+      const chunkPlanesRef = useRef([]);
+      const chunkModeRef   = useRef(false);
+      const chunkCountRef  = useRef(7);
+      const chunkSpacingRef = useRef(300);
 
       // Resizable panels
       const [leftWidth, setLeftWidth] = useState(60); // percentage
@@ -832,6 +919,11 @@
 
       const highlightRef = useRef(highlightState);
       useEffect(() => { highlightRef.current = highlightState; }, [highlightState]);
+
+      // Chunk mode ref syncs
+      useEffect(() => { chunkModeRef.current   = chunkMode;   }, [chunkMode]);
+      useEffect(() => { chunkCountRef.current  = chunkCount;  }, [chunkCount]);
+      useEffect(() => { chunkSpacingRef.current = chunkSpacing; }, [chunkSpacing]);
 
       const lastRaycastTime = useRef(0);
 
@@ -939,8 +1031,10 @@ useEffect(() => {
         meshMapRef.current = meshMap;
 
         // --- Slice plane widget (renderOrder 3) ---
-        // Stage 7: PlaneGeometry(11000,8000) — matches brain cross-section in raw µm
-        const planeGeo = new THREE.PlaneGeometry(11000, 8000);
+        // Stage 7: PlaneGeometry — size is version-dependent; adult brain is ~20000×15000µm
+        const planeW = atlasVersion === 'p4' ? 11000 : 20000;
+        const planeH = atlasVersion === 'p4' ? 8000  : 15000;
+        const planeGeo = new THREE.PlaneGeometry(planeW, planeH);
         const planeMat = new THREE.MeshBasicMaterial({
           color: new THREE.Color('#4A90D9'), opacity: 0.22,
           transparent: true, side: THREE.DoubleSide, depthWrite: false,
@@ -951,13 +1045,32 @@ useEffect(() => {
         planeRef.current = planeMesh;
 
         // --- EdgesGeometry border lines ---
-        // Stage 7: EdgesGeometry also updated to match PlaneGeometry(11000,8000)
-        const edgesGeo  = new THREE.EdgesGeometry(new THREE.PlaneGeometry(11000, 8000));
+        // Stage 7: EdgesGeometry also updated to match PlaneGeometry (version-dependent)
+        const edgesGeo  = new THREE.EdgesGeometry(new THREE.PlaneGeometry(planeW, planeH));
         const edgesMat  = new THREE.LineBasicMaterial({ color: '#4A90D9', linewidth: 1 });
         const planeEdges = new THREE.LineSegments(edgesGeo, edgesMat);
         planeEdges.renderOrder = 3;
         scene.add(planeEdges);
         planeEdgesRef.current = planeEdges;
+
+        // Pre-allocate 15 chunk plane mesh + edge pairs
+        const chunkPlaneObjects = [];
+        for (let ci = 0; ci < 15; ci++) {
+          const cpGeo  = new THREE.PlaneGeometry(planeW, planeH);
+          const cpMesh = new THREE.Mesh(cpGeo, new THREE.MeshBasicMaterial({
+            color: '#7B9EE8', opacity: 0.12, transparent: true, side: THREE.DoubleSide, depthWrite: false,
+          }));
+          cpMesh.visible = false; cpMesh.renderOrder = 3;
+          scene.add(cpMesh);
+          const cpEdge = new THREE.LineSegments(
+            new THREE.EdgesGeometry(cpGeo),
+            new THREE.LineBasicMaterial({ color: '#7B9EE8', opacity: 0.35, transparent: true })
+          );
+          cpEdge.visible = false; cpEdge.renderOrder = 3;
+          scene.add(cpEdge);
+          chunkPlaneObjects.push({ mesh: cpMesh, edge: cpEdge });
+        }
+        chunkPlanesRef.current = chunkPlaneObjects;
 
         // --- Animation loop ---
         const animate = () => {
@@ -1021,6 +1134,39 @@ useEffect(() => {
               -ss.dvPosition,
               -ss.apPosition
             );
+          }
+
+          // Chunk planes
+          const chunkObjs = chunkPlanesRef.current;
+          const isChunk   = chunkModeRef.current;
+          const nChunk    = chunkCountRef.current;
+          const spacingC  = chunkSpacingRef.current;
+          if (chunkObjs && chunkObjs.length > 0) {
+            const euler = new THREE.Euler(
+              THREE.MathUtils.degToRad(ss.roll),
+              THREE.MathUtils.degToRad(ss.yaw),
+              THREE.MathUtils.degToRad(ss.pitch), 'XYZ'
+            );
+            const n = new THREE.Vector3(0, 0, 1).applyEuler(euler).normalize();
+            chunkObjs.forEach((obj, ci) => {
+              if (!isChunk || ci >= nChunk) {
+                obj.mesh.visible = false; obj.edge.visible = false; return;
+              }
+              const offset = (ci - (nChunk - 1) / 2) * spacingC;
+              const px = ss.lrPosition  + n.x * offset;
+              const py = -ss.dvPosition + n.y * offset;
+              const pz = -ss.apPosition + n.z * offset;
+              [obj.mesh, obj.edge].forEach(o => {
+                o.rotation.set(THREE.MathUtils.degToRad(ss.roll), THREE.MathUtils.degToRad(ss.yaw), THREE.MathUtils.degToRad(ss.pitch));
+                o.position.set(px, py, pz);
+                o.visible = true;
+              });
+              const distFromCenter = Math.abs(ci - (nChunk - 1) / 2);
+              obj.mesh.material.opacity = Math.max(0.05, 0.18 - distFromCenter * 0.015);
+            });
+            // Hide main plane when chunk mode is on
+            if (planeRef.current)      planeRef.current.visible      = !isChunk;
+            if (planeEdgesRef.current) planeEdgesRef.current.visible = !isChunk;
           }
 
           updateCamera();
@@ -1243,8 +1389,10 @@ useEffect(() => {
 
         for (let i = -halfCount; i <= halfCount; i++) {
           if (i === 0) continue;
-          // Stage 7: ghost plane enlarged to match PlaneGeometry(11000,8000)
-          const ghostGeo = new THREE.PlaneGeometry(11000, 8000);
+          // Stage 7: ghost plane — version-dependent to cover adult brain extent
+          const ghostW = atlasVersion === 'p4' ? 11000 : 20000;
+          const ghostH = atlasVersion === 'p4' ? 8000  : 15000;
+          const ghostGeo = new THREE.PlaneGeometry(ghostW, ghostH);
           const ghostMat = new THREE.MeshBasicMaterial({
             color: '#4A90D9', opacity: 0.06,
             transparent: true, side: THREE.DoubleSide, depthWrite: false,
@@ -1303,8 +1451,8 @@ useEffect(() => {
           setMeshLoadState({ ...meshLoadStateRef.current });
         }
 
-        function onFailed(targetMesh) {
-          if (targetMesh) targetMesh.visible = true; // Ensure fallback is visible
+        function onFailed(targetMesh, acronym) {
+          if (targetMesh) targetMesh.visible = !acronym || visibilityRef.current[acronym] !== false;
           meshLoadStateRef.current.failed++;
           setMeshLoadState({ ...meshLoadStateRef.current });
         }
@@ -1320,7 +1468,7 @@ useEffect(() => {
           geometry.computeBoundingSphere();
           targetMesh.geometry = geometry;
           targetMesh.position.set(0, 0, 0); // PLY files are stored in absolute CCF coordinates
-          targetMesh.visible = true;
+          targetMesh.visible = visibilityRef.current[acronym] !== false;
           targetMesh.frustumCulled = false;
           if (targetMesh.material) targetMesh.material.needsUpdate = true;
           onLoaded();
@@ -1331,7 +1479,7 @@ useEffect(() => {
           const THREE = window.THREE;
           if (!THREE?.PLYLoader) {
             console.warn(`PLYLoader unavailable for ${acronym}. Using ellipsoid fallback.`);
-            onFailed(targetMesh);
+            onFailed(targetMesh, acronym);
             return;
           }
           const loader = new THREE.PLYLoader();
@@ -1342,13 +1490,13 @@ useEffect(() => {
                 finishLoadedMesh(targetMesh, geometry, acronym);
               } catch (err) {
                 console.warn(`Static PLY load failed for ${acronym}: ${err.message}. Using ellipsoid fallback.`);
-                onFailed(targetMesh);
+                onFailed(targetMesh, acronym);
               }
             },
             undefined,
             () => {
               console.warn(`Static PLY unavailable for ${acronym} (id=${structureId}). Using ellipsoid fallback.`);
-              onFailed(targetMesh);
+              onFailed(targetMesh, acronym);
             }
           );
         }
@@ -1378,7 +1526,7 @@ useEffect(() => {
               if (data.faces.length % 3 !== 0)
                 throw new Error(`Malformed faces for ${acronym}`);
               const verts = new Float32Array(data.vertices);
-              applyCcfToThree(verts, acronym);
+              // applyCcfToThree is called inside finishLoadedMesh — do NOT call here
               const THREE2 = window.THREE;
               const geo = new THREE2.BufferGeometry();
               geo.setAttribute('position', new THREE2.BufferAttribute(verts, 3));
@@ -1391,13 +1539,13 @@ useEffect(() => {
             .catch(err => {
               clearTimeout(timeoutId);
               console.warn(`Allen mesh unavailable for ${acronym} (id=${structureId}): ${err.message}. Using ellipsoid fallback.`);
-              onFailed(targetMesh);
+              onFailed(targetMesh, acronym);
             });
         }
 
         structures.forEach(s => {
           const targetMesh = meshMapRef.current[s.acronym];
-          if (!targetMesh) { console.warn(`Mesh loading: "${s.acronym}" not in meshMapRef. Skipping.`); onFailed(null); return; }
+          if (!targetMesh) { console.warn(`Mesh loading: "${s.acronym}" not in meshMapRef. Skipping.`); onFailed(null, s.acronym); return; }
           fetchAndApplyMesh(s.id, s.acronym, targetMesh);
         });
         fetchAndApplyMesh(ROOT_MESH_ID, 'root', shellRef.current);
@@ -1502,9 +1650,12 @@ useEffect(() => {
       // Slider change handler
       // ---------------------------------------------------------------------------
       const handleSliderChange = useCallback((field, rawValue) => {
+        const isP4 = atlasVersion === 'p4';
         const RANGES = {
-          pitch: [-45, 45], yaw: [-45, 45], roll: [-45, 45],
-          apPosition: [-3000, 3000], lrPosition: [-3000, 3000], dvPosition: [-2000, 2000],
+          pitch: [-90, 90], yaw: [-90, 90], roll: [-90, 90],
+          apPosition: isP4 ? [-3700, 3700] : [-6500, 6500],
+          lrPosition: [-5500, 5500],
+          dvPosition: isP4 ? [-2000, 2000] : [-4000, 4000],
         };
         let value = Number(rawValue);
         if (field in RANGES) {
@@ -1512,6 +1663,16 @@ useEffect(() => {
           value = Math.max(lo, Math.min(hi, value));
         }
         setSliceState(prev => ({ ...prev, [field]: value }));
+      }, [atlasVersion]);
+
+      const nudgeAngle = useCallback((field, delta) => {
+        setSliceState(prev => {
+          const next = Number(prev[field] || 0) + delta;
+          return {
+            ...prev,
+            [field]: Math.max(-90, Math.min(90, next)),
+          };
+        });
       }, []);
 
       // ---------------------------------------------------------------------------
@@ -1620,7 +1781,35 @@ useEffect(() => {
         // Reset 2D interaction on new slice
         setSlice2DOrbit({ panX: 0, panY: 0, zoom: 1 });
         setSlice2DHover(null);
+        rightPanelRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
       }, [sliceState, selectedThickness]);
+
+      // ---------------------------------------------------------------------------
+      // handleGenerateChunk
+      // ---------------------------------------------------------------------------
+      const handleGenerateChunk = useCallback(() => {
+        if (!sceneRef.current) return;
+        sceneRef.current.updateMatrixWorld(true);
+        const THREE = window.THREE;
+        const euler = new THREE.Euler(
+          THREE.MathUtils.degToRad(sliceState.roll),
+          THREE.MathUtils.degToRad(sliceState.yaw),
+          THREE.MathUtils.degToRad(sliceState.pitch), 'XYZ'
+        );
+        const normal = new THREE.Vector3(0, 0, 1).applyEuler(euler).normalize();
+        const slices = [];
+        for (let i = 0; i < chunkCount; i++) {
+          const offset = (i - (chunkCount - 1) / 2) * chunkSpacing;
+          const lrPos  = sliceState.lrPosition  + normal.x * offset;
+          const dvPos  = sliceState.dvPosition  - normal.y * offset;
+          const apPos  = sliceState.apPosition  - normal.z * offset;
+          const plane  = buildSlicePlane(sliceState.pitch, sliceState.yaw, sliceState.roll, apPos, lrPos, dvPos);
+          const ix     = computeAllIntersections(structureMeshesRef.current, plane);
+          slices.push({ index: i, offset: Math.round(offset), plane, intersections: ix, ...sliceState });
+        }
+        setChunkResult(slices);
+        rightPanelRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+      }, [sliceState, chunkCount, chunkSpacing, computeAllIntersections]);
 
       // ---------------------------------------------------------------------------
       // Export handlers
@@ -2114,7 +2303,7 @@ useEffect(() => {
                 <input
                   ref={rollSliderRef}
                   type="range" className="frame-slider"
-                  min={-45} max={45} step={1}
+                  min={-90} max={90} step={1}
                   value={sliceState.roll}
                   onChange={e => setSliceState(s => ({ ...s, roll: Number(e.target.value) }))}
                   style={{
@@ -2341,7 +2530,9 @@ useEffect(() => {
                 <input
                   ref={dvSliderRef}
                   type="range" className="frame-slider"
-                  min={-2000} max={2000} step={50}
+                  min={atlasVersion === 'p4' ? -2000 : -4000}
+                  max={atlasVersion === 'p4' ? 2000 : 4000}
+                  step={50}
                   value={sliceState.dvPosition}
                   onChange={e => setSliceState(s => ({ ...s, dvPosition: Number(e.target.value) }))}
                   style={{
@@ -2366,7 +2557,7 @@ useEffect(() => {
                 <div style={{ position: 'relative', width: '100%' }}>
                   <input
                     type="range" className="frame-slider"
-                    min={-45} max={45} step={1}
+                    min={-90} max={90} step={1}
                     value={sliceState.yaw}
                     onChange={e => setSliceState(s => ({ ...s, yaw: Number(e.target.value) }))}
                     style={{ width: '100%', display: 'block' }}
@@ -2457,6 +2648,122 @@ useEffect(() => {
                   <DistanceMeter apPosition={sliceState.apPosition} atlasVersion={atlasVersion} />
                 </div>
 
+                {/* Axial spin / pitch control */}
+                <div style={{
+                  marginBottom: 22,
+                  padding: 14,
+                  borderRadius: 8,
+                  border: `1px solid ${T.border}`,
+                  background: 'linear-gradient(180deg, #F7F4EE 0%, #F0EDE6 100%)',
+                }}>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    gap: 10, marginBottom: 10,
+                  }}>
+                    <div>
+                      <div style={{
+                        fontFamily: T.fontMono, fontSize: 10, letterSpacing: '0.1em',
+                        color: T.textMuted, textTransform: 'uppercase', marginBottom: 4,
+                      }}>
+                        Axial Spin
+                      </div>
+                      <div style={{
+                        fontFamily: T.fontSerif, fontSize: 16, color: T.text, lineHeight: 1.1,
+                      }}>
+                        Full 180° blade rotation
+                      </div>
+                      <div style={{
+                        fontFamily: T.fontMono, fontSize: 10, color: T.textMuted, marginTop: 4,
+                      }}>
+                        Rotates the slice plane around its own axis from -90° to +90°.
+                      </div>
+                    </div>
+                    <div style={{
+                      minWidth: 70, padding: '8px 10px',
+                      borderRadius: 8, border: `1px solid ${T.border}`,
+                      background: '#FAF8F5', textAlign: 'center',
+                    }}>
+                      <div style={{ fontFamily: T.fontMono, fontSize: 9, color: T.textMuted, marginBottom: 2 }}>
+                        CURRENT
+                      </div>
+                      <div style={{ fontFamily: T.fontMono, fontSize: 16, color: T.accent, fontWeight: 600 }}>
+                        {sliceState.pitch > 0 ? '+' : ''}{sliceState.pitch}°
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+                    <button
+                      onClick={() => nudgeAngle('pitch', -15)}
+                      style={{
+                        flex: '0 0 auto', minWidth: 44, padding: '7px 10px',
+                        borderRadius: 6, border: `1px solid ${T.border}`,
+                        background: '#FAF8F5', color: T.text, cursor: 'pointer',
+                        fontFamily: T.fontMono, fontSize: 11,
+                      }}
+                    >
+                      -15°
+                    </button>
+                    <input
+                      type="range"
+                      className="frame-slider"
+                      min={-90}
+                      max={90}
+                      step={1}
+                      value={sliceState.pitch}
+                      onChange={e => handleSliderChange('pitch', e.target.value)}
+                      style={{ flex: 1 }}
+                    />
+                    <button
+                      onClick={() => nudgeAngle('pitch', 15)}
+                      style={{
+                        flex: '0 0 auto', minWidth: 44, padding: '7px 10px',
+                        borderRadius: 6, border: `1px solid ${T.border}`,
+                        background: '#FAF8F5', color: T.text, cursor: 'pointer',
+                        fontFamily: T.fontMono, fontSize: 11,
+                      }}
+                    >
+                      +15°
+                    </button>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <div style={{
+                      fontFamily: T.fontMono, fontSize: 9, color: T.textMuted, minWidth: 36,
+                    }}>
+                      -90°
+                    </div>
+                    <input
+                      type="number"
+                      min={-90}
+                      max={90}
+                      step={1}
+                      value={sliceState.pitch}
+                      onChange={e => handleSliderChange('pitch', e.target.value)}
+                      style={{
+                        width: 86,
+                        borderRadius: 6,
+                        border: `1px solid ${T.border}`,
+                        background: '#FAF8F5',
+                        color: T.text,
+                        fontFamily: T.fontMono,
+                        fontSize: 12,
+                        padding: '7px 10px',
+                      }}
+                    />
+                    <div style={{
+                      fontFamily: T.fontMono, fontSize: 9, color: T.textMuted, flex: 1,
+                    }}>
+                      axial spin / pitch
+                    </div>
+                    <div style={{
+                      fontFamily: T.fontMono, fontSize: 9, color: T.textMuted, minWidth: 36, textAlign: 'right',
+                    }}>
+                      +90°
+                    </div>
+                  </div>
+                </div>
+
                 {/* Circuit Presets */}
                 <div style={{ marginBottom: 22 }}>
                   <div style={{
@@ -2512,18 +2819,83 @@ useEffect(() => {
                     })}
                   </div>
                 </div>
-              </div>
 
-              {/* Divider */}
-              <div style={{ height: 1, background: T.border, flexShrink: 0 }} />
+                {/* ---- CHUNK MODE ---- */}
+                <div style={{ marginTop: 22, border: `1px solid ${T.border}`, borderRadius: 6, overflow: 'hidden' }}>
+                  {/* Header toggle */}
+                  <div
+                    onClick={() => { setChunkMode(v => !v); if (chunkMode) setChunkResult(null); }}
+                    style={{
+                      display:'flex', alignItems:'center', justifyContent:'space-between',
+                      padding:'8px 12px', cursor:'pointer',
+                      background: chunkMode ? '#EBF2E8' : '#F0EDE6',
+                      borderBottom: chunkMode ? `1px solid ${T.border}` : 'none',
+                    }}
+                  >
+                    <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                      <div style={{ width:28, height:15, borderRadius:8, position:'relative', background: chunkMode ? T.accent : T.border, flexShrink:0 }}>
+                        <div style={{ position:'absolute', top:2, left: chunkMode?15:2, width:11, height:11, borderRadius:6, background:'white', transition:'left 0.2s' }} />
+                      </div>
+                      <span style={{ fontFamily:T.fontMono, fontSize:10, fontWeight:600, letterSpacing:'0.08em', color: chunkMode ? T.accent : T.textMuted }}>
+                        CHUNK MODE
+                      </span>
+                    </div>
+                    <span style={{ fontFamily:T.fontMono, fontSize:9, color:T.textMuted }}>
+                      {chunkMode ? `${chunkCount} × ${chunkSpacing}µm` : 'OFF'}
+                    </span>
+                  </div>
 
-              {/* ================================================================
-                  Slice Output Panel (bottom half)
-              ================================================================ */}
-              <div style={{
-                flex: '0 0 auto', minHeight: 460, padding: 16,
-                display: 'flex', flexDirection: 'column', overflowY: 'auto',
-              }}>
+                  {chunkMode && (
+                    <div style={{ padding:'10px 12px' }}>
+                      {/* Count slider */}
+                      <div style={{ marginBottom:10 }}>
+                        <div style={{ display:'flex', justifyContent:'space-between', fontSize:9, color:T.textMuted, marginBottom:3, fontFamily:T.fontMono }}>
+                          <span>SLICES</span>
+                          <span style={{ color:T.accent, fontWeight:500 }}>{chunkCount}</span>
+                        </div>
+                        <input type="range" className="frame-slider" min={2} max={15} step={1} value={chunkCount}
+                          onChange={e => setChunkCount(Number(e.target.value))}
+                          style={{ width:'100%' }} />
+                      </div>
+                      {/* Spacing slider */}
+                      <div style={{ marginBottom:10 }}>
+                        <div style={{ display:'flex', justifyContent:'space-between', fontSize:9, color:T.textMuted, marginBottom:3, fontFamily:T.fontMono }}>
+                          <span>SPACING</span>
+                          <span style={{ color:T.accent, fontWeight:500 }}>{chunkSpacing}µm</span>
+                        </div>
+                        <input type="range" className="frame-slider" min={100} max={2000} step={50} value={chunkSpacing}
+                          onChange={e => setChunkSpacing(Number(e.target.value))}
+                          style={{ width:'100%' }} />
+                      </div>
+                      <div style={{ fontFamily:T.fontMono, fontSize:8, color:T.textMuted, marginBottom:10 }}>
+                        span: {((chunkCount-1)*chunkSpacing/1000).toFixed(1)}mm total · {chunkCount} sections
+                      </div>
+                      <button onClick={handleGenerateChunk} style={{
+                        width:'100%', padding:10, background:T.gold, color:'white',
+                        border:'none', borderRadius:6, fontSize:13, cursor:'pointer',
+                        fontFamily:T.fontMono, letterSpacing:'0.05em',
+                      }}>
+                        Generate Chunk
+                      </button>
+
+                      {chunkResult && (
+                        <div style={{ marginTop:12 }}>
+                          <div style={{ fontFamily:T.fontMono, fontSize:9, color:T.textMuted, marginBottom:6 }}>
+                            FILMSTRIP — {chunkResult.length} slices × {chunkSpacing}µm
+                          </div>
+                          <div style={{ display:'flex', gap:5, overflowX:'auto', paddingBottom:4 }}>
+                            {chunkResult.map((slice,i) => (
+                              <ChunkSliceThumb key={i} slice={slice} index={i} total={chunkResult.length} />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* ---- internal divider between controls and slice output ---- */}
+                <div style={{ height: 1, background: T.border, margin: '22px 0' }} />
 
                 {sliceResult === null ? (
                   <>
@@ -2597,8 +2969,9 @@ useEffect(() => {
                           </span>
                         )}
                         {[
-                          ['Top',  sliceResult.yaw,       '°'],
-                          ['Side', sliceResult.roll,      '°'],
+                          ['Axial', sliceResult.pitch,      '°'],
+                          ['Top',   sliceResult.yaw,        '°'],
+                          ['Side',  sliceResult.roll,       '°'],
                           ['Thick', sliceResult.thickness,  ''],
                         ].map(([k, v, u]) => (
                           <span key={k} style={{
@@ -2663,7 +3036,7 @@ useEffect(() => {
 
                     {sliceResult.intersections.length === 0 ? (
                       <div style={{ fontFamily: T.fontMono, fontSize: 11, color: T.textMuted, textAlign: 'center', padding: '16px 0' }}>
-                        No structures at this plane position.<br/>Try adjusting A→P position or pitch.
+                        No structures at this plane position.<br/>Try adjusting A→P position, axial spin, or side angle.
                       </div>
                     ) : (
                       <div style={{ overflowY: 'auto', flex: 1 }}>
@@ -2792,7 +3165,7 @@ useEffect(() => {
                                 {entry.name}
                               </div>
                               <div style={{ fontFamily: '"DM Mono",monospace', fontSize: 9, color: '#8A8078' }}>
-                                P:{entry.pitch}° Y:{entry.yaw}° R:{entry.roll}° | {entry.thickness}
+                                Ax:{entry.pitch}° Top:{entry.yaw}° Side:{entry.roll}° | {entry.thickness}
                               </div>
                             </div>
                             <button
@@ -2900,7 +3273,7 @@ useEffect(() => {
                 </div>
                 {/* end Saved Slices Panel */}
 
-              </div>{/* end Slice Output Panel */}
+              </div>{/* end controls panel (scrollable) */}
             </div>{/* end right panel */}
           </div>{/* end root container */}
         </>
